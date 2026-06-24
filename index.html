@@ -17,6 +17,7 @@
     </div>
   </div>
   <div class="header-right">
+    <span class="sync-label"><span class="sync-dot" id="sync-dot"></span><span id="sync-lbl">Loading…</span></span>
     <span class="report-badge" id="report-badge">Jun 24, 2026</span>
     <button class="btn btn-outline" onclick="openUploadModal()">📂 New Report</button>
     <button class="btn btn-outline" onclick="openAddStoreModal()">+ Add Store</button>
@@ -25,14 +26,21 @@
 </header>
 
 <nav class="tab-bar">
-  <button class="tab active" data-tab="inventory" onclick="switchTab('inventory',this)">📦 Inventory</button>
-  <button class="tab" data-tab="deliveries" onclick="switchTab('deliveries',this)">🚚 Deliveries</button>
-  <button class="tab" data-tab="sales" onclick="switchTab('sales',this)">📊 Sales History</button>
+  <button class="tab active" data-tab="inventory"  onclick="switchTab('inventory',this)">📦 Inventory</button>
+  <button class="tab"        data-tab="deliveries" onclick="switchTab('deliveries',this)">🚚 Deliveries</button>
+  <button class="tab"        data-tab="sales"      onclick="switchTab('sales',this)">📊 Sales History</button>
 </nav>
+
+<!-- Google Sheets config banner (hidden when configured) -->
+<div id="config-banner" class="config-panel" style="display:none">
+  <strong>⚙️ Connect Google Sheets for real-time sync across all devices</strong><br>
+  Open <code>sheets.js</code> and paste your Apps Script Web App URL into <code>SHEET_URL</code>.<br>
+  See <code>README.md</code> → "Connect Google Sheets" for the 3-step setup.
+  <a href="https://github.com" target="_blank" style="margin-left:8px">Open README ↗</a>
+</div>
 
 <!-- ===================== INVENTORY TAB ===================== -->
 <div id="tab-inventory" class="tab-panel active">
-
   <div class="stats-bar" id="inv-stats"></div>
 
   <div class="controls-bar">
@@ -43,13 +51,13 @@
       <button class="pill" onclick="setInvFilter('dropped',this)">📉 Big drops</button>
     </div>
     <div class="control-right">
-      <input type="text" id="search-input" placeholder="Search store # or city..." oninput="renderInventory()">
+      <input type="text" id="search-input" placeholder="Search store # or city…" oninput="renderInventory()">
       <select id="inv-sort" onchange="renderInventory()">
         <option value="status">Priority first</option>
         <option value="store">Store #</option>
         <option value="city">City</option>
-        <option value="spc">Spicy (low→high)</option>
-        <option value="mld">Mild (low→high)</option>
+        <option value="spc">Spicy low→high</option>
+        <option value="mld">Mild low→high</option>
       </select>
       <button class="btn btn-dark" onclick="exportDispatch()">📋 Export dispatch</button>
     </div>
@@ -58,27 +66,26 @@
   <div class="count-bar" id="inv-count"></div>
 
   <div class="table-wrap">
-  <table id="inv-table">
-  <thead>
-    <tr>
-      <th>Store</th>
-      <th>Address</th>
-      <th>City</th>
-      <th>Status</th>
-      <th>🌶️ Spicy</th>
-      <th>🧡 Mild</th>
-      <th>vs Last</th>
-      <th>Actions</th>
-    </tr>
-  </thead>
-  <tbody id="inv-body"></tbody>
-  </table>
+    <table>
+      <thead>
+        <tr>
+          <th>Store</th>
+          <th>Address</th>
+          <th>City</th>
+          <th>Status</th>
+          <th>🌶️ Spicy</th>
+          <th>🧡 Mild</th>
+          <th>vs Last</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="inv-body"></tbody>
+    </table>
   </div>
 </div>
 
 <!-- ===================== DELIVERIES TAB ===================== -->
 <div id="tab-deliveries" class="tab-panel">
-
   <div class="stats-bar" id="del-stats"></div>
 
   <div class="controls-bar">
@@ -103,29 +110,28 @@
   <div class="count-bar" id="del-count"></div>
 
   <div class="table-wrap">
-  <table id="del-table">
-  <thead>
-    <tr>
-      <th>Store #</th>
-      <th>Address</th>
-      <th>Spicy</th>
-      <th>Mild</th>
-      <th>Cases</th>
-      <th>Revenue</th>
-      <th>Driver</th>
-      <th>Date</th>
-      <th>Status</th>
-      <th>Update</th>
-    </tr>
-  </thead>
-  <tbody id="del-body"></tbody>
-  </table>
+    <table>
+      <thead>
+        <tr>
+          <th>Store #</th>
+          <th>Address</th>
+          <th>🌶️ Spicy</th>
+          <th>🧡 Mild</th>
+          <th>Cases</th>
+          <th>Revenue</th>
+          <th>Driver</th>
+          <th>Date</th>
+          <th>Status</th>
+          <th>Update</th>
+        </tr>
+      </thead>
+      <tbody id="del-body"></tbody>
+    </table>
   </div>
 </div>
 
 <!-- ===================== SALES TAB ===================== -->
 <div id="tab-sales" class="tab-panel">
-
   <div class="stats-bar" id="sales-stats"></div>
 
   <div class="controls-bar">
@@ -145,18 +151,16 @@
   </div>
 
   <div class="table-wrap">
-  <table id="sales-table">
-  <thead>
-    <tr id="sales-thead-row"></tr>
-  </thead>
-  <tbody id="sales-body"></tbody>
-  </table>
+    <table>
+      <thead><tr id="sales-thead-row"></tr></thead>
+      <tbody id="sales-body"></tbody>
+    </table>
   </div>
 </div>
 
 <!-- ===================== MODALS ===================== -->
 
-<!-- Dispatch export modal -->
+<!-- Dispatch export -->
 <div class="modal-overlay" id="dispatch-modal" onclick="closeModal('dispatch-modal')">
   <div class="modal" onclick="event.stopPropagation()">
     <div class="modal-header">
@@ -171,7 +175,7 @@
   </div>
 </div>
 
-<!-- Delivery status update modal -->
+<!-- Delivery status update -->
 <div class="modal-overlay" id="status-modal" onclick="closeModal('status-modal')">
   <div class="modal modal-sm" onclick="event.stopPropagation()">
     <div class="modal-header">
@@ -183,9 +187,9 @@
         <label>Status</label>
         <div class="status-btns">
           <button class="status-btn" data-status="pending" onclick="selectStatus(this)">⏳ Pending</button>
-          <button class="status-btn" data-status="out" onclick="selectStatus(this)">🚚 Out for delivery</button>
+          <button class="status-btn" data-status="out"     onclick="selectStatus(this)">🚚 Out for delivery</button>
           <button class="status-btn" data-status="delivered" onclick="selectStatus(this)">✅ Delivered</button>
-          <button class="status-btn" data-status="failed" onclick="selectStatus(this)">❌ Failed / Rejected</button>
+          <button class="status-btn" data-status="failed"  onclick="selectStatus(this)">❌ Failed / Rejected</button>
         </div>
       </div>
       <div class="field-group">
@@ -196,11 +200,11 @@
         <label>Notes</label>
         <textarea id="notes-input" placeholder="Invoice #, issues, etc." rows="3"></textarea>
       </div>
-      <div class="field-group" id="spicy-field-wrap">
+      <div class="field-group">
         <label>Spicy cases delivered</label>
         <input type="number" id="spicy-delivered" min="0" value="1">
       </div>
-      <div class="field-group" id="mild-field-wrap">
+      <div class="field-group">
         <label>Mild cases delivered</label>
         <input type="number" id="mild-delivered" min="0" value="1">
       </div>
@@ -212,7 +216,7 @@
   </div>
 </div>
 
-<!-- New delivery run modal -->
+<!-- New delivery run -->
 <div class="modal-overlay" id="run-modal" onclick="closeModal('run-modal')">
   <div class="modal modal-sm" onclick="event.stopPropagation()">
     <div class="modal-header">
@@ -220,7 +224,7 @@
       <button class="modal-close" onclick="closeModal('run-modal')">×</button>
     </div>
     <div class="modal-body">
-      <p class="modal-hint">Select stores to include in this run. Urgent stores are pre-selected.</p>
+      <p class="modal-hint">Urgent and low-stock stores are pre-checked.</p>
       <div class="field-group">
         <label>Driver name</label>
         <input type="text" id="run-driver" placeholder="e.g. Marcus">
@@ -230,7 +234,7 @@
         <input type="date" id="run-date">
       </div>
       <div class="field-group">
-        <label>Select stores (up to 5 for one day)</label>
+        <label>Select stores</label>
         <div id="run-store-list" class="store-checklist"></div>
       </div>
     </div>
@@ -241,7 +245,7 @@
   </div>
 </div>
 
-<!-- Add store modal -->
+<!-- Add store -->
 <div class="modal-overlay" id="addstore-modal" onclick="closeModal('addstore-modal')">
   <div class="modal modal-sm" onclick="event.stopPropagation()">
     <div class="modal-header">
@@ -263,7 +267,7 @@
   </div>
 </div>
 
-<!-- Email Rachel modal -->
+<!-- Email Rachel -->
 <div class="modal-overlay" id="email-modal" onclick="closeModal('email-modal')">
   <div class="modal modal-sm" onclick="event.stopPropagation()">
     <div class="modal-header">
@@ -273,14 +277,16 @@
     <div class="modal-body">
       <div class="field-group"><label>To</label><input type="text" value="Rachel.Lovelady@foodlion.com" readonly></div>
       <div class="field-group"><label>Subject</label><input type="text" id="email-subject" value="Inventory Report Request — Aunt Carol's Sauce (TTP Foods LLC #07005300)"></div>
-      <div class="field-group"><label>Message</label><textarea id="email-body" rows="6">Hi Rachel,
+      <div class="field-group"><label>Message</label>
+        <textarea id="email-body" rows="6">Hi Rachel,
 
 Hope you're doing well! Could you please send over the latest inventory report for Aunt Carol's Sauce (Vendor #07005300)?
 
 Please reply with the report attached when ready.
 
 Thank you!
-TJ — TTP Foods LLC</textarea></div>
+TJ — TTP Foods LLC</textarea>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-red" onclick="sendEmail()">Open in email</button>
@@ -289,7 +295,9 @@ TJ — TTP Foods LLC</textarea></div>
   </div>
 </div>
 
+<!-- Scripts: data → sheets → app -->
 <script src="data.js"></script>
+<script src="sheets.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
