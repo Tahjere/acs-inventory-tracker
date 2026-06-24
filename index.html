@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aunt Carol's Sauce — Operations Dashboard</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <span class="logo-flame">🌶️</span>
+    <div>
+      <h1>Aunt Carol's Sauce</h1>
+      <span class="header-sub">Operations Dashboard — TTP Foods LLC #07005300</span>
+    </div>
+  </div>
+  <div class="header-right">
+    <span class="report-badge" id="report-badge">Jun 24, 2026</span>
+    <button class="btn btn-outline" onclick="openUploadModal()">📂 New Report</button>
+    <button class="btn btn-outline" onclick="openAddStoreModal()">+ Add Store</button>
+    <button class="btn btn-red" onclick="openEmailModal()">✉️ Email Rachel</button>
+  </div>
+</header>
+
+<nav class="tab-bar">
+  <button class="tab active" data-tab="inventory" onclick="switchTab('inventory',this)">📦 Inventory</button>
+  <button class="tab" data-tab="deliveries" onclick="switchTab('deliveries',this)">🚚 Deliveries</button>
+  <button class="tab" data-tab="sales" onclick="switchTab('sales',this)">📊 Sales History</button>
+</nav>
+
+<!-- ===================== INVENTORY TAB ===================== -->
+<div id="tab-inventory" class="tab-panel active">
+
+  <div class="stats-bar" id="inv-stats"></div>
+
+  <div class="controls-bar">
+    <div class="filter-pills">
+      <button class="pill active" onclick="setInvFilter('all',this)">All</button>
+      <button class="pill" onclick="setInvFilter('urgent',this)">🔴 Both out</button>
+      <button class="pill" onclick="setInvFilter('low',this)">🟡 Low stock</button>
+      <button class="pill" onclick="setInvFilter('dropped',this)">📉 Big drops</button>
+    </div>
+    <div class="control-right">
+      <input type="text" id="search-input" placeholder="Search store # or city..." oninput="renderInventory()">
+      <select id="inv-sort" onchange="renderInventory()">
+        <option value="status">Priority first</option>
+        <option value="store">Store #</option>
+        <option value="city">City</option>
+        <option value="spc">Spicy (low→high)</option>
+        <option value="mld">Mild (low→high)</option>
+      </select>
+      <button class="btn btn-dark" onclick="exportDispatch()">📋 Export dispatch</button>
+    </div>
+  </div>
+
+  <div class="count-bar" id="inv-count"></div>
+
+  <div class="table-wrap">
+  <table id="inv-table">
+  <thead>
+    <tr>
+      <th>Store</th>
+      <th>Address</th>
+      <th>City</th>
+      <th>Status</th>
+      <th>🌶️ Spicy</th>
+      <th>🧡 Mild</th>
+      <th>vs Last</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody id="inv-body"></tbody>
+  </table>
+  </div>
+</div>
+
+<!-- ===================== DELIVERIES TAB ===================== -->
+<div id="tab-deliveries" class="tab-panel">
+
+  <div class="stats-bar" id="del-stats"></div>
+
+  <div class="controls-bar">
+    <div class="filter-pills">
+      <button class="pill active" onclick="setDelFilter('all',this)">All</button>
+      <button class="pill" onclick="setDelFilter('pending',this)">⏳ Pending</button>
+      <button class="pill" onclick="setDelFilter('out',this)">🚚 Out for delivery</button>
+      <button class="pill" onclick="setDelFilter('delivered',this)">✅ Delivered</button>
+      <button class="pill" onclick="setDelFilter('failed',this)">❌ Failed</button>
+    </div>
+    <div class="control-right">
+      <select id="del-date-filter" onchange="renderDeliveries()">
+        <option value="all">All dates</option>
+        <option value="today">Today</option>
+        <option value="week">This week</option>
+        <option value="month">This month</option>
+      </select>
+      <button class="btn btn-dark" onclick="createDeliveryRun()">+ New delivery run</button>
+    </div>
+  </div>
+
+  <div class="count-bar" id="del-count"></div>
+
+  <div class="table-wrap">
+  <table id="del-table">
+  <thead>
+    <tr>
+      <th>Store #</th>
+      <th>Address</th>
+      <th>Spicy</th>
+      <th>Mild</th>
+      <th>Cases</th>
+      <th>Revenue</th>
+      <th>Driver</th>
+      <th>Date</th>
+      <th>Status</th>
+      <th>Update</th>
+    </tr>
+  </thead>
+  <tbody id="del-body"></tbody>
+  </table>
+  </div>
+</div>
+
+<!-- ===================== SALES TAB ===================== -->
+<div id="tab-sales" class="tab-panel">
+
+  <div class="stats-bar" id="sales-stats"></div>
+
+  <div class="controls-bar">
+    <div class="filter-pills">
+      <button class="pill active" onclick="setSalesFilter('all',this)">All time</button>
+      <button class="pill" onclick="setSalesFilter('month',this)">This month</button>
+      <button class="pill" onclick="setSalesFilter('week',this)">This week</button>
+    </div>
+    <div class="control-right">
+      <select id="sales-group" onchange="renderSales()">
+        <option value="store">By store</option>
+        <option value="city">By city</option>
+        <option value="date">By date</option>
+        <option value="sku">By SKU</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+  <table id="sales-table">
+  <thead>
+    <tr id="sales-thead-row"></tr>
+  </thead>
+  <tbody id="sales-body"></tbody>
+  </table>
+  </div>
+</div>
+
+<!-- ===================== MODALS ===================== -->
+
+<!-- Dispatch export modal -->
+<div class="modal-overlay" id="dispatch-modal" onclick="closeModal('dispatch-modal')">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3>Dispatch List</h3>
+      <button class="modal-close" onclick="closeModal('dispatch-modal')">×</button>
+    </div>
+    <pre id="dispatch-text"></pre>
+    <div class="modal-footer">
+      <button class="btn btn-dark" onclick="copyDispatch()">📋 Copy</button>
+      <button class="btn btn-outline" onclick="closeModal('dispatch-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Delivery status update modal -->
+<div class="modal-overlay" id="status-modal" onclick="closeModal('status-modal')">
+  <div class="modal modal-sm" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3 id="status-modal-title">Update Delivery</h3>
+      <button class="modal-close" onclick="closeModal('status-modal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-group">
+        <label>Status</label>
+        <div class="status-btns">
+          <button class="status-btn" data-status="pending" onclick="selectStatus(this)">⏳ Pending</button>
+          <button class="status-btn" data-status="out" onclick="selectStatus(this)">🚚 Out for delivery</button>
+          <button class="status-btn" data-status="delivered" onclick="selectStatus(this)">✅ Delivered</button>
+          <button class="status-btn" data-status="failed" onclick="selectStatus(this)">❌ Failed / Rejected</button>
+        </div>
+      </div>
+      <div class="field-group">
+        <label>Driver name</label>
+        <input type="text" id="driver-input" placeholder="Driver name">
+      </div>
+      <div class="field-group">
+        <label>Notes</label>
+        <textarea id="notes-input" placeholder="Invoice #, issues, etc." rows="3"></textarea>
+      </div>
+      <div class="field-group" id="spicy-field-wrap">
+        <label>Spicy cases delivered</label>
+        <input type="number" id="spicy-delivered" min="0" value="1">
+      </div>
+      <div class="field-group" id="mild-field-wrap">
+        <label>Mild cases delivered</label>
+        <input type="number" id="mild-delivered" min="0" value="1">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-dark" onclick="saveStatus()">Save</button>
+      <button class="btn btn-outline" onclick="closeModal('status-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- New delivery run modal -->
+<div class="modal-overlay" id="run-modal" onclick="closeModal('run-modal')">
+  <div class="modal modal-sm" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3>New Delivery Run</h3>
+      <button class="modal-close" onclick="closeModal('run-modal')">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="modal-hint">Select stores to include in this run. Urgent stores are pre-selected.</p>
+      <div class="field-group">
+        <label>Driver name</label>
+        <input type="text" id="run-driver" placeholder="e.g. Marcus">
+      </div>
+      <div class="field-group">
+        <label>Date</label>
+        <input type="date" id="run-date">
+      </div>
+      <div class="field-group">
+        <label>Select stores (up to 5 for one day)</label>
+        <div id="run-store-list" class="store-checklist"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-dark" onclick="saveRun()">Create run</button>
+      <button class="btn btn-outline" onclick="closeModal('run-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add store modal -->
+<div class="modal-overlay" id="addstore-modal" onclick="closeModal('addstore-modal')">
+  <div class="modal modal-sm" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3>Add New Store</h3>
+      <button class="modal-close" onclick="closeModal('addstore-modal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-group"><label>Store #</label><input type="text" id="ns-num" placeholder="e.g. 2900"></div>
+      <div class="field-group"><label>Address</label><input type="text" id="ns-addr" placeholder="123 Main St"></div>
+      <div class="field-group"><label>City</label><input type="text" id="ns-city" placeholder="Norfolk"></div>
+      <div class="field-group"><label>Zip</label><input type="text" id="ns-zip" placeholder="23501"></div>
+      <div class="field-group"><label>Current Spicy units</label><input type="number" id="ns-spc" value="0" min="0"></div>
+      <div class="field-group"><label>Current Mild units</label><input type="number" id="ns-mld" value="0" min="0"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-dark" onclick="saveNewStore()">Add store</button>
+      <button class="btn btn-outline" onclick="closeModal('addstore-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Email Rachel modal -->
+<div class="modal-overlay" id="email-modal" onclick="closeModal('email-modal')">
+  <div class="modal modal-sm" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3>Request Inventory Report</h3>
+      <button class="modal-close" onclick="closeModal('email-modal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-group"><label>To</label><input type="text" value="Rachel.Lovelady@foodlion.com" readonly></div>
+      <div class="field-group"><label>Subject</label><input type="text" id="email-subject" value="Inventory Report Request — Aunt Carol's Sauce (TTP Foods LLC #07005300)"></div>
+      <div class="field-group"><label>Message</label><textarea id="email-body" rows="6">Hi Rachel,
+
+Hope you're doing well! Could you please send over the latest inventory report for Aunt Carol's Sauce (Vendor #07005300)?
+
+Please reply with the report attached when ready.
+
+Thank you!
+TJ — TTP Foods LLC</textarea></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-red" onclick="sendEmail()">Open in email</button>
+      <button class="btn btn-outline" onclick="closeModal('email-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
