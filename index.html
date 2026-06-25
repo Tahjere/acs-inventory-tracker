@@ -17,7 +17,9 @@
     </div>
   </div>
   <div class="header-right">
-    <span class="sync-label"><span class="sync-dot" id="sync-dot"></span><span id="sync-lbl">Loading…</span></span>
+    <span class="sync-label" onclick="testSheetConnection()" title="Click to retry connection" style="cursor:pointer">
+      <span class="sync-dot" id="sync-dot"></span><span id="sync-lbl">Connecting…</span>
+    </span>
     <span class="report-badge" id="report-badge">Jun 24, 2026</span>
     <button class="btn btn-outline" onclick="openUploadModal()">📂 New Report</button>
     <button class="btn btn-outline" onclick="openAddStoreModal()">+ Add Store</button>
@@ -31,12 +33,10 @@
   <button class="tab"        data-tab="sales"      onclick="switchTab('sales',this)">📊 Sales History</button>
 </nav>
 
-<!-- Google Sheets config banner (hidden when configured) -->
-<div id="config-banner" class="config-panel" style="display:none">
-  <strong>⚙️ Connect Google Sheets for real-time sync across all devices</strong><br>
-  Open <code>sheets.js</code> and paste your Apps Script Web App URL into <code>SHEET_URL</code>.<br>
-  See <code>README.md</code> → "Connect Google Sheets" for the 3-step setup.
-  <a href="https://github.com" target="_blank" style="margin-left:8px">Open README ↗</a>
+<!-- Google Sheets config banner — shows connection status and fix steps -->
+<div id="config-banner" class="config-panel">
+  <strong>⚙️ Connecting to Google Sheets…</strong> Checking your Apps Script connection.
+  <button onclick="testSheetConnection()" style="margin-left:10px;padding:3px 10px;cursor:pointer;border-radius:5px;border:1px solid #ccc;font-size:12px">Test connection</button>
 </div>
 
 <!-- ===================== INVENTORY TAB ===================== -->
