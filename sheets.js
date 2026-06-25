@@ -22,10 +22,10 @@
 //    completed sale now writes directly to your Sheet in real time.
 // ============================================================
 
-const SHEET_URL = 'YOUR_APPS_SCRIPT_WEB_APP_URL_HERE';
+const SHEET_URL = 'https://script.google.com/macros/s/AKfycbyLD-WlibU4daMR5Idw9OhPhATzUE2o_KSF3zysGghf0dsfRmk5hIIF87y7HXtPWj_JAw/exec';
 // Example: 'https://script.google.com/macros/s/AKfycbyBLxa.../exec'
 
-const SHEET_CONFIGURED = SHEET_URL !== 'YOUR_APPS_SCRIPT_WEB_APP_URL_HERE';
+const SHEET_CONFIGURED = SHEET_URL !== 'https://script.google.com/macros/s/AKfycbyLD-WlibU4daMR5Idw9OhPhATzUE2o_KSF3zysGghf0dsfRmk5hIIF87y7HXtPWj_JAw/exec';
 
 // ── Sync status UI ───────────────────────────────────────────
 function setSyncStatus(state, msg) {
