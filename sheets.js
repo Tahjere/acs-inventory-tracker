@@ -6,7 +6,7 @@
 // update SHEET_URL here and push to GitHub.
 // ============================================================
 
-const SHEET_URL = 'https://script.google.com/macros/s/AKfycbyBLxa6MIICHmPwFSk1Ip_-nvOe4ZRkX-PBeKybVBTiwloqsyXMw90FheBasVbJ15nUkQ/exec';
+const SHEET_URL = 'https://script.google.com/macros/s/AKfycbyLD-WlibU4daMR5Idw9OhPhATzUE2o_KSF3zysGghf0dsfRmk5hIIF87y7HXtPWj_JAw/exec';
 
 const SHEET_CONFIGURED = SHEET_URL.startsWith('https://script.google.com');
 
