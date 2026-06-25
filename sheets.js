@@ -22,7 +22,7 @@
 //    completed sale now writes directly to your Sheet in real time.
 // ============================================================
 
-const SHEET_URL = 'https://script.google.com/macros/s/AKfycbyLD-WlibU4daMR5Idw9OhPhATzUE2o_KSF3zysGghf0dsfRmk5hIIF87y7HXtPWj_JAw/exe';
+const SHEET_URL = 'https://script.google.com/macros/s/AKfycbyLD-WlibU4daMR5Idw9OhPhATzUE2o_KSF3zysGghf0dsfRmk5hIIF87y7HXtPWj_JAw/exec';
 
 const SHEET_CONFIGURED = SHEET_URL.startsWith('https://script.google.com');
 
