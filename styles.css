@@ -549,3 +549,52 @@ pre#dispatch-text {
   .status-btns    { grid-template-columns: 1fr; }
   .sync-label     { display: none; }
 }
+
+/* ── Upload drop zone ──────────────────────────────────────── */
+.drop-zone {
+  border: 2px dashed var(--border2);
+  border-radius: var(--radius);
+  padding: 1.75rem 1rem;
+  text-align: center;
+  cursor: pointer;
+  transition: all .15s;
+  background: var(--bg2);
+  user-select: none;
+}
+.drop-zone:hover,
+.drop-zone.drag-over {
+  border-color: var(--blue);
+  background: var(--blue-bg);
+}
+.drop-icon  { font-size: 32px; margin-bottom: .5rem; }
+.drop-label { font-size: 13px; font-weight: 500; color: var(--ink2); }
+.drop-or    { color: var(--ink3); font-weight: 400; }
+.drop-hint  { font-size: 11px; color: var(--ink3); margin-top: 4px; font-family: monospace; }
+
+/* ── Import modal tabs ─────────────────────────────────────── */
+.import-tabs {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: .875rem;
+}
+.import-tab {
+  flex: 1;
+  padding: 7px 10px;
+  border: none;
+  background: var(--bg2);
+  color: var(--ink3);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all .1s;
+  border-right: 1px solid var(--border2);
+}
+.import-tab:last-child { border-right: none; }
+.import-tab:hover  { background: var(--bg); color: var(--ink); }
+.import-tab.active { background: var(--ink); color: #fff; }
+
+.import-panel { display: none; }
+.import-panel.active { display: block; }

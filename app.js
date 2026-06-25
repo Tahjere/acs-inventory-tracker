@@ -18,23 +18,23 @@ async function boot() {
   loadDeliveriesLocal();   // show cached data instantly
   renderAll();
 
-  if (SHEET_CONFIGURED) {
-    setSyncStatus('busy', 'Connecting…');
-    await refreshFromSheet();
-  } else {
-    setSyncStatus('err', 'Sheet not configured');
-    showConfigBanner();
-  }
-
   // Set default date in run modal
   const rd = document.getElementById('run-date');
   if (rd) rd.value = today();
-}
 
-// ── Config banner ─────────────────────────────────────────────
-function showConfigBanner() {
-  const banner = document.getElementById('config-banner');
-  if (banner) banner.style.display = 'block';
+  if (SHEET_CONFIGURED) {
+    // Test connection first — this sets the dot color and shows error detail if needed
+    await testSheetConnection();
+    // Only pull data if connection succeeded
+    const dot = document.getElementById('sync-dot');
+    if (dot && dot.classList.contains('ok')) {
+      await refreshFromSheet();
+    }
+  } else {
+    setSyncStatus('err', 'Sheet not configured');
+    const banner = document.getElementById('config-banner');
+    if (banner) banner.style.display = 'block';
+  }
 }
 
 // ── Pull fresh data from Sheet ────────────────────────────────
@@ -637,7 +637,31 @@ function sendEmail() {
 // UPLOAD MODAL
 // ══════════════════════════════════════════════════════════════
 function openUploadModal() {
-  alert('To update inventory:\n1. Email Rachel → get the new .docx\n2. Upload it to Claude.ai with this message:\n   "Update my dashboard data.js with this new report"\n3. Push the updated data.js to GitHub → Netlify auto-deploys');
+  // Reset modal state
+  const area = document.getElementById('parse-drop-area');
+  const status = document.getElementById('parse-status');
+  const summary = document.getElementById('parse-summary');
+  if (area)   { area.style.borderColor=''; area.style.background=''; }
+  if (status) { status.textContent=''; }
+  if (summary){ summary.style.display='none'; summary.innerHTML=''; }
+  document.getElementById('report-file-input').value = '';
+  document.getElementById('upload-modal').classList.add('open');
+}
+
+
+// ── Import modal tab switcher ─────────────────────────────────
+function switchImportTab(name, el) {
+  document.querySelectorAll('.import-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.import-panel').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('import-tab-' + name).classList.add('active');
+}
+
+function clearParseState() {
+  const status  = document.getElementById('parse-status');
+  const summary = document.getElementById('parse-summary');
+  if (status)  status.textContent = '';
+  if (summary) { summary.style.display = 'none'; summary.innerHTML = ''; }
 }
 
 // ══════════════════════════════════════════════════════════════

@@ -44,7 +44,8 @@ function route(e) {
     updateDelivery:  () => updateRow('Deliveries', DEL_COLS, body),
     deleteDelivery:  () => deleteRow('Deliveries', body.id),
     addSale:         () => appendRow('Sales', SALE_COLS, body),
-    addStore:        () => appendRow('Stores', STORE_COLS, body),
+    addStore:            () => appendRow('Stores', STORE_COLS, body),
+    bulkUpdateInventory: () => bulkUpdateStores(body.stores || []),
   };
 
   const fn = handlers[action];
@@ -114,4 +115,45 @@ function deleteRow(name, id) {
   if (rowIdx === -1) return { ok: false, error: 'Not found' };
   sheet.deleteRow(rowIdx + 2);
   return { ok: true };
+}
+
+// ── Bulk update/insert inventory from a parsed report ─────────
+function bulkUpdateStores(storeList) {
+  const sheet = getSheet('Stores');
+  const lastRow = sheet.getLastRow();
+
+  // Build a map of existing storeId → sheet row number
+  const existingIds = lastRow >= 2
+    ? sheet.getRange(2, 1, lastRow - 1, 1).getValues().flat().map(String)
+    : [];
+
+  const now = new Date().toISOString();
+
+  storeList.forEach(s => {
+    const idStr = String(s.storeId);
+    const rowData = STORE_COLS.map(col => {
+      if (col === 'storeId')  return s.storeId;
+      if (col === 'addedAt')  return s.updatedAt || now;
+      return s[col] !== undefined ? s[col] : '';
+    });
+
+    const existingIdx = existingIds.indexOf(idStr);
+    if (existingIdx >= 0) {
+      // Update existing row
+      sheet.getRange(existingIdx + 2, 1, 1, STORE_COLS.length).setValues([rowData]);
+    } else {
+      // Append new store
+      sheet.appendRow(rowData);
+      existingIds.push(idStr);
+    }
+  });
+
+  // Also write a report log entry to a "Reports" tab
+  const logSheet = SS.getSheetByName('Reports') || SS.insertSheet('Reports');
+  if (logSheet.getLastRow() === 0) {
+    logSheet.appendRow(['timestamp','fileName','storesUpdated','reportLabel']);
+  }
+  logSheet.appendRow([now, storeList[0]?.reportLabel || 'report', storeList.length, storeList[0]?.reportLabel || '']);
+
+  return { ok: true, updated: storeList.length };
 }

@@ -17,7 +17,7 @@
     </div>
   </div>
   <div class="header-right">
-    <span class="sync-label" onclick="testSheetConnection()" title="Click to retry connection" style="cursor:pointer">
+    <span class="sync-label" onclick="testSheetConnection()" title="Click to retry" style="cursor:pointer">
       <span class="sync-dot" id="sync-dot"></span><span id="sync-lbl">Connecting…</span>
     </span>
     <span class="report-badge" id="report-badge">Jun 24, 2026</span>
@@ -33,7 +33,6 @@
   <button class="tab"        data-tab="sales"      onclick="switchTab('sales',this)">📊 Sales History</button>
 </nav>
 
-<!-- Google Sheets config banner — shows connection status and fix steps -->
 <div id="config-banner" class="config-panel">
   <strong>⚙️ Connecting to Google Sheets…</strong> Checking your Apps Script connection.
   <button onclick="testSheetConnection()" style="margin-left:10px;padding:3px 10px;cursor:pointer;border-radius:5px;border:1px solid #ccc;font-size:12px">Test connection</button>
@@ -42,7 +41,6 @@
 <!-- ===================== INVENTORY TAB ===================== -->
 <div id="tab-inventory" class="tab-panel active">
   <div class="stats-bar" id="inv-stats"></div>
-
   <div class="controls-bar">
     <div class="filter-pills">
       <button class="pill active" onclick="setInvFilter('all',this)">All</button>
@@ -62,23 +60,13 @@
       <button class="btn btn-dark" onclick="exportDispatch()">📋 Export dispatch</button>
     </div>
   </div>
-
   <div class="count-bar" id="inv-count"></div>
-
   <div class="table-wrap">
     <table>
-      <thead>
-        <tr>
-          <th>Store</th>
-          <th>Address</th>
-          <th>City</th>
-          <th>Status</th>
-          <th>🌶️ Spicy</th>
-          <th>🧡 Mild</th>
-          <th>vs Last</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
+      <thead><tr>
+        <th>Store</th><th>Address</th><th>City</th><th>Status</th>
+        <th>🌶️ Spicy</th><th>🧡 Mild</th><th>vs Last</th><th>Actions</th>
+      </tr></thead>
       <tbody id="inv-body"></tbody>
     </table>
   </div>
@@ -87,7 +75,6 @@
 <!-- ===================== DELIVERIES TAB ===================== -->
 <div id="tab-deliveries" class="tab-panel">
   <div class="stats-bar" id="del-stats"></div>
-
   <div class="controls-bar">
     <div class="filter-pills">
       <button class="pill active" onclick="setDelFilter('all',this)">All</button>
@@ -106,25 +93,13 @@
       <button class="btn btn-dark" onclick="createDeliveryRun()">+ New delivery run</button>
     </div>
   </div>
-
   <div class="count-bar" id="del-count"></div>
-
   <div class="table-wrap">
     <table>
-      <thead>
-        <tr>
-          <th>Store #</th>
-          <th>Address</th>
-          <th>🌶️ Spicy</th>
-          <th>🧡 Mild</th>
-          <th>Cases</th>
-          <th>Revenue</th>
-          <th>Driver</th>
-          <th>Date</th>
-          <th>Status</th>
-          <th>Update</th>
-        </tr>
-      </thead>
+      <thead><tr>
+        <th>Store #</th><th>Address</th><th>🌶️ Spicy</th><th>🧡 Mild</th>
+        <th>Cases</th><th>Revenue</th><th>Driver</th><th>Date</th><th>Status</th><th>Update</th>
+      </tr></thead>
       <tbody id="del-body"></tbody>
     </table>
   </div>
@@ -133,7 +108,6 @@
 <!-- ===================== SALES TAB ===================== -->
 <div id="tab-sales" class="tab-panel">
   <div class="stats-bar" id="sales-stats"></div>
-
   <div class="controls-bar">
     <div class="filter-pills">
       <button class="pill active" onclick="setSalesFilter('all',this)">All time</button>
@@ -149,7 +123,6 @@
       </select>
     </div>
   </div>
-
   <div class="table-wrap">
     <table>
       <thead><tr id="sales-thead-row"></tr></thead>
@@ -159,6 +132,68 @@
 </div>
 
 <!-- ===================== MODALS ===================== -->
+
+<!-- Upload Report -->
+<div class="modal-overlay" id="upload-modal" onclick="closeModal('upload-modal')">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3>📋 Import Inventory Report</h3>
+      <button class="modal-close" onclick="closeModal('upload-modal')">×</button>
+    </div>
+    <div class="modal-body">
+
+      <!-- Tab switcher inside modal -->
+      <div class="import-tabs">
+        <button class="import-tab active" onclick="switchImportTab('paste', this)">✉️ Paste from email</button>
+        <button class="import-tab" onclick="switchImportTab('file', this)">📄 Upload .docx file</button>
+      </div>
+
+      <!-- PASTE TAB (default — most common workflow) -->
+      <div id="import-tab-paste" class="import-panel active">
+        <p class="modal-hint" style="margin-bottom:.625rem">
+          Open Rachel's email, select all the table text, copy it (Ctrl+C / Cmd+C), then paste it here.
+        </p>
+        <textarea id="paste-input"
+          placeholder="Paste inventory table here…
+
+Example of what it looks like:
+171	86000870950	AUNT CAROLS SPC SAUC		12.00
+171	86000870951	AUNT CAROLS MLD SAUC		12.00
+172	86000870950	AUNT CAROLS SPC SAUC		12.00
+172	86000870951	AUNT CAROLS MLD SAUC		0.00"
+          rows="10"
+          style="width:100%;font-family:monospace;font-size:12px;resize:vertical"
+          oninput="clearParseState()"></textarea>
+        <div id="parse-status" style="font-size:12px;margin:.4rem 0;min-height:16px;color:var(--ink3)"></div>
+        <button class="btn btn-dark" style="width:100%;margin-top:.25rem" onclick="handlePasteSubmit()">
+          Parse &amp; update inventory
+        </button>
+      </div>
+
+      <!-- FILE TAB -->
+      <div id="import-tab-file" class="import-panel">
+        <p class="modal-hint" style="margin-bottom:.625rem">Upload the .docx file Rachel attaches to her email.</p>
+        <div id="parse-drop-area" class="drop-zone" onclick="document.getElementById('report-file-input').click()">
+          <input type="file" id="report-file-input" accept=".docx" style="display:none" onchange="handleReportUpload(event)">
+          <div class="drop-icon">📄</div>
+          <div class="drop-label">Click to choose file <span class="drop-or">or drag &amp; drop</span></div>
+          <div class="drop-hint">Food_Lion_Inventory_report_*.docx</div>
+        </div>
+      </div>
+
+      <!-- Result summary (shared between both tabs) -->
+      <div id="parse-summary" style="display:none;margin-top:.875rem;background:var(--green-bg);border:1px solid var(--green-bd);border-radius:var(--radius);padding:.875rem 1rem;font-size:13px;line-height:1.6"></div>
+
+      <div style="margin-top:1rem;padding-top:.875rem;border-top:1px solid var(--border);font-size:12px;color:var(--ink3);line-height:1.6">
+        <strong>What happens either way:</strong>
+        Current counts roll to "previous" · New counts become current · Delta column updates · Google Sheets syncs · New stores auto-added
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal('upload-modal')">Close</button>
+    </div>
+  </div>
+</div>
 
 <!-- Dispatch export -->
 <div class="modal-overlay" id="dispatch-modal" onclick="closeModal('dispatch-modal')">
@@ -186,10 +221,10 @@
       <div class="field-group">
         <label>Status</label>
         <div class="status-btns">
-          <button class="status-btn" data-status="pending" onclick="selectStatus(this)">⏳ Pending</button>
-          <button class="status-btn" data-status="out"     onclick="selectStatus(this)">🚚 Out for delivery</button>
+          <button class="status-btn" data-status="pending"   onclick="selectStatus(this)">⏳ Pending</button>
+          <button class="status-btn" data-status="out"       onclick="selectStatus(this)">🚚 Out for delivery</button>
           <button class="status-btn" data-status="delivered" onclick="selectStatus(this)">✅ Delivered</button>
-          <button class="status-btn" data-status="failed"  onclick="selectStatus(this)">❌ Failed / Rejected</button>
+          <button class="status-btn" data-status="failed"    onclick="selectStatus(this)">❌ Failed / Rejected</button>
         </div>
       </div>
       <div class="field-group">
@@ -295,9 +330,9 @@ TJ — TTP Foods LLC</textarea>
   </div>
 </div>
 
-<!-- Scripts: data → sheets → app -->
 <script src="data.js"></script>
 <script src="sheets.js"></script>
+<script src="parser.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

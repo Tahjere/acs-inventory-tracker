@@ -1,28 +1,12 @@
 // ============================================================
 // GOOGLE SHEETS BACKEND  — sheets.js
 // ============================================================
-// HOW TO SET UP (one-time, ~10 minutes):
-//
-// 1. Open your Google Sheet:
-//    https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID
-//    Create THREE tabs named exactly:
-//      Deliveries | Sales | Stores
-//
-// 2. In the Sheet, go to Extensions → Apps Script
-//    Paste the code from google-apps-script.js into the editor
-//    Click Save, then Deploy → New Deployment → Web App
-//    Set "Who has access" to "Anyone"  (no sign-in needed for your Netlify app)
-//    Copy the Web App URL — it looks like:
-//    https://script.google.com/macros/s/AKfycb.../exec
-//
-// 3. Paste that URL into SHEET_URL below and push to GitHub.
-//    Netlify redeploys automatically.
-//
-// 4. That's it. Every status update, new delivery, and
-//    completed sale now writes directly to your Sheet in real time.
+// Your Apps Script Web App URL is already set below.
+// If you ever redeploy the script and get a new URL,
+// update SHEET_URL here and push to GitHub.
 // ============================================================
 
-const SHEET_URL = 'https://script.google.com/macros/s/AKfycbyLD-WlibU4daMR5Idw9OhPhATzUE2o_KSF3zysGghf0dsfRmk5hIIF87y7HXtPWj_JAw/exec';
+const SHEET_URL = 'https://script.google.com/macros/s/AKfycbyBLxa6MIICHmPwFSk1Ip_-nvOe4ZRkX-PBeKybVBTiwloqsyXMw90FheBasVbJ15nUkQ/exec';
 
 const SHEET_CONFIGURED = SHEET_URL.startsWith('https://script.google.com');
 
