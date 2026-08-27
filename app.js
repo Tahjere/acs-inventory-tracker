@@ -1,12 +1,16 @@
 // ============================================================
-// AUNT CAROL'S SAUCE — APP LOGIC  v2
+// AUNT CAROL'S SAUCE — APP LOGIC  v3
 // Storage: Google Sheets (primary) + localStorage (offline cache)
+// v3 changes: one-tap status updates, bulk filtered actions,
+//             GPS links everywhere (rows, run modal, dispatch text),
+//             smarter queue defaults
 // ============================================================
 
 // ── State ───────────────────────────────────────────────────
 let stores      = {};   // merged BASE_STORES + sheet/localStorage additions
 let deliveries  = [];   // from Sheet (or localStorage fallback)
 let currentEditId = null;
+let currentFilteredDeliveries = []; // snapshot of what's on-screen, for bulk actions
 
 let invFilter   = 'all';
 let delFilter   = 'all';
@@ -117,9 +121,26 @@ function bigDrop(id) {
   return (clamp(d.S_may)-clamp(d.S_jun) >= 5) || (clamp(d.M_may)-clamp(d.M_jun) >= 5);
 }
 
+// ── GPS / Maps helpers ──────────────────────────────────────────
+// Build a maps search link from raw address parts (works for any
+// address, current store record or a delivery's own snapshot).
+function mapsUrlForAddress(addr, city, zip) {
+  return `https://www.google.com/maps/search/${encodeURIComponent(addr+', '+city+', VA '+zip)}`;
+}
+// Convenience wrapper for a store's CURRENT address on file.
 function mapsUrl(id) {
   const d = stores[id];
-  return `https://www.google.com/maps/search/${encodeURIComponent(d.addr+', '+d.city+', VA '+d.zip)}`;
+  if (!d) return '#';
+  return mapsUrlForAddress(d.addr, d.city, d.zip);
+}
+// Multi-stop turn-by-turn route (Google Maps supports this without an API key).
+function buildRouteUrl(addrList) {
+  const capped = addrList.slice(0, 23); // practical cap for a single route link
+  const destination = encodeURIComponent(capped[capped.length-1]);
+  const waypoints = capped.slice(0, -1).map(a=>encodeURIComponent(a)).join('|');
+  let url = `https://www.google.com/maps/dir/?api=1&destination=${destination}&travelmode=driving`;
+  if (waypoints) url += `&waypoints=${waypoints}`;
+  return url;
 }
 
 // ── Tab switching ──────────────────────────────────────────────
@@ -237,7 +258,7 @@ function renderInventory() {
       <td>${skuEl(jm)}</td>
       <td>${dEl(dS)} / ${dEl(dM)}</td>
       <td class="action-cell">
-        <a class="map-link" href="${mapsUrl(id)}" target="_blank">📍</a>
+        <a class="map-link" href="${mapsUrl(id)}" target="_blank" title="Open in Maps">📍</a>
         <button class="btn-xs btn-queue" onclick="queueDelivery(${id})">+ Queue</button>
       </td>
     </tr>`;
@@ -245,13 +266,22 @@ function renderInventory() {
 }
 
 // ── Queue single store from inventory ─────────────────────────
+// Smarter defaults: whichever SKU is fully out gets 2 cases queued
+// instead of 1, and the note flags urgency for the driver.
 async function queueDelivery(storeId) {
   const d = stores[storeId]; if (!d) return;
+  const s = clamp(d.S_jun), m = clamp(d.M_jun);
+  const st = stockStatus(s, m);
+  const spicyQty = s === 0 ? 2 : 1;
+  const mildQty  = m === 0 ? 2 : 1;
+  const autoNote = st === 'urgent' ? 'Urgent restock — both SKUs out'
+                 : st === 'low'    ? 'Low stock restock'
+                 : '';
   const rec = {
     id: String(Date.now()),
     storeId, addr:d.addr, city:d.city, zip:d.zip,
-    spicy:1, mild:1, driver:'', date:today(),
-    status:'pending', notes:'',
+    spicy:spicyQty, mild:mildQty, driver:'', date:today(),
+    status:'pending', notes:autoNote,
     createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(),
   };
   deliveries.unshift(rec);
@@ -269,6 +299,25 @@ function setDelFilter(f, el) {
   document.querySelectorAll('#tab-deliveries .pill').forEach(p => p.classList.remove('active'));
   el.classList.add('active');
   renderDeliveries();
+}
+
+// Inject a small action toolbar above the table once. Buttons act on
+// whatever is currently visible (currentFilteredDeliveries), so they
+// respect the active status/date filters.
+function ensureDeliveryToolbar() {
+  if (document.getElementById('del-toolbar')) return;
+  const stats = document.getElementById('del-stats');
+  if (!stats) return;
+  const bar = document.createElement('div');
+  bar.id = 'del-toolbar';
+  bar.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:10px 0;';
+  bar.innerHTML = `
+    <button class="btn-xs btn-queue" onclick="openRouteForFiltered()">🗺️ Route (filtered)</button>
+    <button class="btn-xs btn-update" onclick="bulkUpdateFiltered('out')">🚚 Mark filtered Out</button>
+    <button class="btn-xs btn-queue" onclick="bulkUpdateFiltered('delivered')">✅ Mark filtered Delivered</button>
+    <button class="btn-xs btn-del" onclick="bulkUpdateFiltered('failed')">❌ Mark filtered Failed</button>
+  `;
+  stats.insertAdjacentElement('afterend', bar);
 }
 
 function renderDeliveries() {
@@ -292,6 +341,8 @@ function renderDeliveries() {
     <div class="stat"><div class="stat-label">Revenue</div><div class="stat-val green">${fmtCur(revenue)}</div></div>
   `;
 
+  ensureDeliveryToolbar();
+
   let filtered = deliveries.filter(d => {
     if (delFilter!=='all' && d.status!==delFilter) return false;
     if (dateF==='today' && d.date!==today()) return false;
@@ -299,6 +350,8 @@ function renderDeliveries() {
     if (dateF==='month' && !isThisMonth(d.date)) return false;
     return true;
   });
+
+  currentFilteredDeliveries = filtered; // for toolbar bulk actions
 
   document.getElementById('del-count').textContent =
     `Showing ${filtered.length} of ${total} records`;
@@ -319,6 +372,7 @@ function renderDeliveries() {
   tbody.innerHTML = filtered.map(d => {
     const cases = clamp(d.spicy)+clamp(d.mild);
     const rev   = cases * PRICING.casePrice;
+    const gps   = mapsUrlForAddress(d.addr, d.city, d.zip);
     return `<tr>
       <td><strong>#${d.storeId}</strong></td>
       <td class="addr-cell">${d.addr}<br><small style="color:var(--ink3)">${d.city}, VA ${d.zip}</small></td>
@@ -330,14 +384,79 @@ function renderDeliveries() {
       <td>${fmtDate(d.date)}</td>
       <td>${statusLabel[d.status] || d.status}</td>
       <td class="action-cell">
-        <button class="btn-xs btn-update" onclick="openStatusModal('${d.id}')">Update</button>
-        <button class="btn-xs btn-del" onclick="deleteDelivery('${d.id}')">×</button>
+        <a class="map-link" href="${gps}" target="_blank" title="Open in Maps">📍</a>
+        ${d.status!=='out'       ? `<button class="btn-xs btn-update" onclick="quickUpdateStatus('${d.id}','out')" title="Mark out for delivery">🚚</button>` : ''}
+        ${d.status!=='delivered' ? `<button class="btn-xs btn-queue"  onclick="quickUpdateStatus('${d.id}','delivered')" title="Mark delivered">✅</button>` : ''}
+        ${d.status!=='failed'    ? `<button class="btn-xs btn-del"    onclick="quickUpdateStatus('${d.id}','failed')" title="Mark failed">❌</button>` : ''}
+        <button class="btn-xs btn-update" onclick="openStatusModal('${d.id}')" title="Edit driver / notes / quantities">✎</button>
+        <button class="btn-xs btn-del" onclick="deleteDelivery('${d.id}')" title="Delete">×</button>
       </td>
     </tr>`;
   }).join('');
 }
 
-// ── Status update modal ───────────────────────────────────────
+// ── One-tap status update (no modal) ───────────────────────────
+// Used by the inline 🚚 / ✅ / ❌ buttons. Keeps existing driver,
+// notes, and case counts — use the ✎ edit modal to change those.
+async function quickUpdateStatus(delivId, status) {
+  const d = deliveries.find(x => String(x.id)===String(delivId));
+  if (!d) return;
+  d.status    = status;
+  d.updatedAt = new Date().toISOString();
+  saveDeliveriesLocal();
+  await sheetUpdateDelivery(d);
+
+  if (status === 'delivered') {
+    const sale = buildSaleRecord(d);
+    const sales = JSON.parse(localStorage.getItem('ac_sales')||'[]');
+    const idx   = sales.findIndex(s=>String(s.deliveryId)===String(d.id));
+    if (idx>=0) sales[idx]=sale; else sales.unshift(sale);
+    localStorage.setItem('ac_sales', JSON.stringify(sales));
+    await sheetAddSale(sale);
+  }
+
+  renderDeliveries();
+  renderSales();
+}
+
+// ── Bulk update everything currently visible in the Deliveries tab ──
+async function bulkUpdateFiltered(status) {
+  const list = currentFilteredDeliveries.filter(d=>d.status!==status);
+  if (!list.length) { alert('Nothing to update in the current view.'); return; }
+  if (!confirm(`Mark ${list.length} filtered deliveries as "${status}"?`)) return;
+
+  list.forEach(d => {
+    d.status    = status;
+    d.updatedAt = new Date().toISOString();
+  });
+  saveDeliveriesLocal();
+  await Promise.all(list.map(d=>sheetUpdateDelivery(d)));
+
+  if (status === 'delivered') {
+    const sales = JSON.parse(localStorage.getItem('ac_sales')||'[]');
+    for (const d of list) {
+      const sale = buildSaleRecord(d);
+      const idx  = sales.findIndex(s=>String(s.deliveryId)===String(d.id));
+      if (idx>=0) sales[idx]=sale; else sales.unshift(sale);
+      await sheetAddSale(sale);
+    }
+    localStorage.setItem('ac_sales', JSON.stringify(sales));
+  }
+
+  renderDeliveries();
+  renderSales();
+}
+
+// ── Multi-stop route for whatever's currently in view ───────────
+function openRouteForFiltered() {
+  const stops = currentFilteredDeliveries.filter(d=>d.status==='pending'||d.status==='out');
+  if (!stops.length) { alert('No pending/out deliveries in the current view to route.'); return; }
+  if (stops.length > 23) alert('Route link is capped at 23 stops — using the first 23 in view.');
+  const addrs = stops.map(d=>`${d.addr}, ${d.city}, VA ${d.zip}`);
+  window.open(buildRouteUrl(addrs), '_blank');
+}
+
+// ── Status update modal (full edit: driver, notes, quantities) ──
 function openStatusModal(delivId) {
   const d = deliveries.find(x => String(x.id)===String(delivId));
   if (!d) return;
@@ -411,11 +530,16 @@ function createDeliveryRun() {
     const st = stockStatus(s, m);
     const pre= st==='urgent'||st==='low';
     const em = st==='urgent'?'🔴':st==='low'?'🟡':'✅';
-    return `<label class="store-check-item">
-      <input type="checkbox" value="${id}" ${pre?'checked':''}>
-      <span>${em} #${id} — ${d.addr}, ${d.city}</span>
-      <small>Spicy:${s} Mild:${m}</small>
-    </label>`;
+    // Link is a sibling of the label (not nested inside it) so tapping
+    // 📍 opens Maps instead of toggling the checkbox.
+    return `<div class="store-check-item" style="display:flex;align-items:center;gap:8px;">
+      <label style="display:flex;align-items:center;gap:8px;flex:1;cursor:pointer;">
+        <input type="checkbox" value="${id}" ${pre?'checked':''}>
+        <span>${em} #${id} — ${d.addr}, ${d.city}</span>
+        <small>Spicy:${s} Mild:${m}</small>
+      </label>
+      <a class="map-link" href="${mapsUrl(id)}" target="_blank" title="Open in Maps">📍</a>
+    </div>`;
   }).join('');
 
   document.getElementById('run-driver').value = '';
@@ -608,9 +732,9 @@ function exportDispatch() {
   txt += `Case price: ${fmtCur(PRICING.casePrice)} | Invoice photos → ${PRICING.invoicePhone}\n`;
   txt += `${'='.repeat(52)}\n\n`;
   txt += `🔴 URGENT — BOTH SKUs AT ZERO (${urgent.length} stores)\n${'—'.repeat(40)}\n`;
-  urgent.forEach(id=>{const d=stores[id];txt+=`#${id} | ${d.addr}, ${d.city}, VA ${d.zip}\n`;});
+  urgent.forEach(id=>{const d=stores[id];txt+=`#${id} | ${d.addr}, ${d.city}, VA ${d.zip}\n  📍 ${mapsUrl(id)}\n`;});
   txt += `\n🟡 LOW STOCK — ONE SKU ≤3 (${low.length} stores)\n${'—'.repeat(40)}\n`;
-  low.forEach(id=>{const d=stores[id];txt+=`#${id} | ${d.addr}, ${d.city}, VA ${d.zip}\n  Spicy:${clamp(d.S_jun)} Mild:${clamp(d.M_jun)}\n`;});
+  low.forEach(id=>{const d=stores[id];txt+=`#${id} | ${d.addr}, ${d.city}, VA ${d.zip}\n  📍 ${mapsUrl(id)}\n  Spicy:${clamp(d.S_jun)} Mild:${clamp(d.M_jun)}\n`;});
   txt += `\nTotal needing delivery: ${urgent.length+low.length}`;
   document.getElementById('dispatch-text').textContent = txt;
   document.getElementById('dispatch-modal').classList.add('open');
