@@ -1,22 +1,18 @@
 // ============================================================
-// AUNT CAROL'S SAUCE — APP LOGIC  v7
+// AUNT CAROL'S SAUCE — APP LOGIC  v8
 // Storage: Google Sheets (primary) + localStorage (offline cache)
-// v7 changes: adds a working "paste report" parser for the Food Lion
-//             scan-report format (store #, address, city, state, zip,
-//             UPC, product name, quantity — repeated per SKU per
-//             store). Splits pasted text into 8-line records, reads
-//             spicy/mild off the UPC suffix (...950/...951) with the
-//             product name as a fallback, handles "(3.00)"-style
-//             negative notation, and shows a review summary (updated
-//             stores / new stores / anomalies like negatives) before
-//             applying anything. Applying merges into `stores` the
-//             same way a Sheet refresh does — S_jun/M_jun get the new
-//             counts, lastRestockedAt/lastRestockNote are preserved.
-//
-// NOTE: I don't have your existing report-file-input parsing logic
-// (it wasn't in the file shared with me), so this is a new, separate
-// "Paste report" path added to the same upload modal — it doesn't
-// touch or replace whatever your file-upload flow already does.
+// v8 changes (fixes for the paste-report feature added in v7):
+//  - Parser rewritten to scan for store-number lines as anchors and
+//    validate each candidate 8-line record (state looks like a state
+//    code, zip looks like a zip, product mentions SPC/MLD) before
+//    accepting it. Stray header rows, page numbers, or footer text
+//    anywhere in the paste now get skipped instead of shifting every
+//    record after them out of alignment.
+//  - The paste UI is now a fully self-contained popup with its own
+//    unique element IDs (pr-status/pr-summary/pr-textarea/etc.)
+//    instead of reusing parse-status/parse-summary, which may already
+//    exist in your real HTML for a separate file-upload feature —
+//    reusing those risked writing into the wrong (invisible) element.
 // ============================================================
 
 // ── State ───────────────────────────────────────────────────
@@ -256,34 +252,44 @@ function renderAll() {
 }
 
 // ══════════════════════════════════════════════════════════════
-// PASTE-REPORT PARSER  (Food Lion scan-report format)
+// PASTE-REPORT PARSER  (Food Lion-style scan-report format)
 // ══════════════════════════════════════════════════════════════
-// Expects repeating 8-line records with blank lines allowed anywhere
-// (they're stripped before chunking):
-//   store#
-//   address
-//   city
-//   state
-//   zip
-//   UPC
-//   product name  (contains "SPC" or "MLD", or UPC ends 950/951)
-//   quantity      (e.g. "12.00" or "(3.00)" for a negative)
+// Scans for lines that are purely a store number and treats each as
+// an "anchor." The 7 lines after an anchor are only accepted as a
+// record if they look right (state code, zip, UPC, product mentions
+// SPC/MLD) — otherwise that anchor is rejected as a false positive
+// (e.g. a stray page number) and scanning resumes one line later.
+// This means header rows, footers, or other junk text anywhere in
+// the paste get skipped instead of shifting every record after them
+// out of alignment.
 function parsePastedReport(rawText) {
-  const nonBlank = rawText.split('\n').map(l => l.trim()).filter(l => l !== '');
+  const lines = String(rawText || '').split('\n').map(l => l.trim()).filter(l => l !== '');
   const results = [];
   const anomalies = [];
+  const n = lines.length;
+  let i = 0;
 
-  for (let i = 0; i < nonBlank.length; ) {
-    const chunk = nonBlank.slice(i, i + 8);
-    if (chunk.length < 8) {
-      if (chunk.length > 0) anomalies.push(`Incomplete record at the end: ${chunk.join(' | ')}`);
+  while (i < n) {
+    if (!/^\d+$/.test(lines[i])) { i++; continue; }
+
+    if (i + 7 >= n) {
+      anomalies.push(`Incomplete record at the end, starting with "${lines[i]}" — ignored.`);
       break;
     }
+
+    const chunk = lines.slice(i, i + 8);
     const [storeNum, addr, city, state, zip, upc, product, qtyRaw] = chunk;
 
-    if (!/^\d+$/.test(storeNum)) {
-      anomalies.push(`Expected a store number, got "${storeNum}" — skipping one line and resyncing.`);
-      i += 1;
+    const looksValid =
+      /^[A-Za-z]{2}$/.test(state) &&
+      /^\d{5}(-\d{4})?$/.test(zip) &&
+      /^\d+$/.test(upc) &&
+      /(SPC|MLD)/i.test(product);
+
+    if (!looksValid) {
+      // False anchor (stray number, header, page number, etc.) —
+      // don't consume 8 lines, just move past this one line.
+      i++;
       continue;
     }
 
@@ -295,26 +301,30 @@ function parsePastedReport(rawText) {
     }
     const qty = parseFloat(qtyStr);
     if (isNaN(qty)) {
-      anomalies.push(`Store #${storeNum}: couldn't read quantity "${qtyRaw}".`);
+      anomalies.push(`Store #${storeNum}: couldn't read quantity "${qtyRaw}" — skipped this line.`);
       i += 8;
       continue;
     }
     const signedQty = negative ? -qty : qty;
-    if (negative) anomalies.push(`Store #${storeNum}: ${product.includes('MLD') ? 'mild' : 'spicy'} quantity is negative (${signedQty}) — likely a return/credit, worth double-checking before trusting it as a shelf count.`);
-
-    const sku = upc.endsWith('951') || product.includes('MLD') ? 'mild'
-              : upc.endsWith('950') || product.includes('SPC') ? 'spicy'
+    const sku = /MLD/i.test(product) || upc.endsWith('951') ? 'mild'
+              : /SPC/i.test(product) || upc.endsWith('950') ? 'spicy'
               : null;
-    if (!sku) anomalies.push(`Store #${storeNum}: couldn't tell spicy vs. mild from "${product}" / UPC ${upc} — skipped.`);
 
-    results.push({ storeNum, addr, city, state, zip, upc, product, sku, qty: signedQty });
+    if (negative) {
+      anomalies.push(`Store #${storeNum}: ${sku || 'a'} quantity is negative (${signedQty}) — likely a return/credit, worth double-checking before trusting it as a shelf count.`);
+    }
+    if (!sku) {
+      anomalies.push(`Store #${storeNum}: couldn't tell spicy vs. mild from "${product}" / UPC ${upc} — skipped.`);
+    } else {
+      results.push({ storeNum, addr, city, state, zip, upc, product, sku, qty: signedQty });
+    }
+
     i += 8;
   }
 
   // Group into per-store updates
   const byStore = {};
   results.forEach(r => {
-    if (!r.sku) return;
     if (!byStore[r.storeNum]) {
       byStore[r.storeNum] = { addr: r.addr, city: r.city, zip: r.zip, spicy: null, mild: null };
     }
@@ -327,30 +337,49 @@ function parsePastedReport(rawText) {
     }
   });
 
-  return { byStore, anomalies, recordCount: results.length };
+  return { byStore, anomalies, recordCount: results.length, totalLines: n };
 }
 
 // Stage parsed results and show a review summary before touching any
 // data. Nothing is applied until applyPastedReport() is called.
 function previewPastedReport(rawText) {
-  const { byStore, anomalies, recordCount } = parsePastedReport(rawText);
+  let parsed;
+  try {
+    parsed = parsePastedReport(rawText);
+  } catch (e) {
+    const statusEl = document.getElementById('pr-status');
+    if (statusEl) statusEl.textContent = `Parse error: ${e.message}`;
+    return;
+  }
+
+  const { byStore, anomalies, recordCount, totalLines } = parsed;
   const storeNums = Object.keys(byStore);
+  pendingReportUpdates = byStore;
 
   const newStores = storeNums.filter(id => !stores[id]);
   const existingStores = storeNums.filter(id => stores[id]);
 
-  pendingReportUpdates = byStore;
+  const statusEl = document.getElementById('pr-status');
+  const summaryEl = document.getElementById('pr-summary');
 
-  const statusEl = document.getElementById('parse-status');
-  const summaryEl = document.getElementById('parse-summary');
-  if (statusEl) statusEl.textContent = `Parsed ${recordCount} lines across ${storeNums.length} stores.`;
+  if (statusEl) {
+    statusEl.textContent = storeNums.length
+      ? `Recognized ${recordCount} SKU line(s) across ${storeNums.length} store(s), out of ${totalLines} non-blank line(s) pasted.`
+      : `Found 0 valid records out of ${totalLines} non-blank line(s) pasted. This usually means the format doesn't match store#/address/city/state/zip/UPC/product/qty per line — check the raw text below.`;
+  }
+
   if (summaryEl) {
     summaryEl.style.display = 'block';
-    summaryEl.innerHTML = `
+    summaryEl.innerHTML = storeNums.length ? `
       <div style="margin-bottom:6px;"><strong>${existingStores.length}</strong> existing stores will be updated, <strong>${newStores.length}</strong> new stores will be added.</div>
       ${newStores.length ? `<div style="margin-bottom:6px;">New: ${newStores.map(id=>'#'+id).join(', ')}</div>` : ''}
       ${anomalies.length ? `<div style="color:#b45309;margin-bottom:6px;"><strong>${anomalies.length} thing(s) to check:</strong><br>${anomalies.map(a=>'• '+a).join('<br>')}</div>` : '<div style="color:#15803d;">No anomalies found.</div>'}
       <button class="btn-xs btn-queue" onclick="applyPastedReport()">Apply ${storeNums.length} stores to Inventory</button>
+    ` : `
+      ${anomalies.length ? `<div style="color:#b45309;">${anomalies.map(a=>'• '+a).join('<br>')}</div>` : ''}
+      <div style="margin-top:6px;color:#666;">First 3 non-blank lines of what was pasted, for reference:<br>
+        <code style="white-space:pre-wrap;">${String(rawText||'').split('\\n').map(l=>l.trim()).filter(l=>l).slice(0,3).join('\\n')}</code>
+      </div>
     `;
   }
 }
@@ -387,30 +416,50 @@ async function applyPastedReport() {
 
   pendingReportUpdates = null;
   renderInventory();
-  closeModal('upload-modal');
+  closePasteReportModal();
   clearParseState();
 }
 
-// Builds (once) a "Paste report" panel inside the upload modal if one
-// isn't already there. Doesn't touch or replace an existing
-// file-upload flow — this is an additional textarea + button.
-function ensurePasteReportPanel() {
-  const modalBody = document.getElementById('upload-modal');
-  if (!modalBody || document.getElementById('paste-report-panel')) return;
-  const panel = document.createElement('div');
-  panel.id = 'paste-report-panel';
-  panel.style.cssText = 'margin-top:12px;';
-  panel.innerHTML = `
-    <label style="display:block;margin-bottom:6px;font-size:13px;">Paste report text (Food Lion scan-report format)</label>
-    <textarea id="paste-report-textarea" rows="8" style="width:100%;box-sizing:border-box;padding:8px;font-family:monospace;font-size:12px;"></textarea>
-    <div style="margin-top:8px;">
-      <button class="btn-xs btn-queue" onclick="previewPastedReport(document.getElementById('paste-report-textarea').value)">Parse pasted report</button>
-    </div>
+// ── Self-contained "Paste report" popup ──────────────────────────
+// Built entirely in JS with its own unique element IDs (pr-*) so it
+// can never collide with parse-status/parse-summary/report-file-input
+// or any other IDs your existing HTML might already define for a
+// separate file-upload feature.
+function ensurePasteReportModal() {
+  if (document.getElementById('paste-report-modal')) return;
+  const modal = document.createElement('div');
+  modal.id = 'paste-report-modal';
+  modal.style.cssText = `
+    display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5);
+    z-index:9999; align-items:center; justify-content:center; padding:20px;
   `;
-  // Append inside whatever container holds the modal's content, falling
-  // back to the modal element itself.
-  const target = modalBody.querySelector('.modal-content') || modalBody.firstElementChild || modalBody;
-  target.appendChild(panel);
+  modal.innerHTML = `
+    <div style="background:var(--bg,#fff); color:var(--ink,#111); padding:20px; border-radius:10px; width:600px; max-width:95vw; max-height:90vh; overflow:auto; font-family:inherit;">
+      <h3 style="margin:0 0 8px;">Paste inventory report</h3>
+      <p style="font-size:13px;color:#666;margin:0 0 10px;">
+        Paste a scan report: store #, address, city, state, zip, UPC, product, quantity — repeated per SKU per store.
+        Extra header rows, page numbers, or footer text anywhere are fine, they'll be skipped automatically.
+      </p>
+      <textarea id="pr-textarea" rows="10" style="width:100%;box-sizing:border-box;padding:8px;font-family:monospace;font-size:12px;"></textarea>
+      <div style="margin-top:10px;display:flex;gap:8px;">
+        <button class="btn-xs btn-queue" onclick="previewPastedReport(document.getElementById('pr-textarea').value)">Parse pasted report</button>
+        <button class="btn-xs" onclick="closePasteReportModal()">Close</button>
+      </div>
+      <div id="pr-status" style="margin-top:10px;font-size:13px;"></div>
+      <div id="pr-summary" style="display:none;margin-top:8px;font-size:13px;"></div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+function openPasteReportModal() {
+  ensurePasteReportModal();
+  clearParseState();
+  document.getElementById('paste-report-modal').style.display = 'flex';
+}
+
+function closePasteReportModal() {
+  const m = document.getElementById('paste-report-modal');
+  if (m) m.style.display = 'none';
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1246,16 +1295,18 @@ function sendEmail() {
 // UPLOAD MODAL
 // ══════════════════════════════════════════════════════════════
 function openUploadModal() {
-  // Reset modal state
+  // Reset any pre-existing file-upload UI, if your HTML has one — all
+  // guarded, so this is a no-op if those elements don't exist.
   const area = document.getElementById('parse-drop-area');
-  const status = document.getElementById('parse-status');
-  const summary = document.getElementById('parse-summary');
-  if (area)   { area.style.borderColor=''; area.style.background=''; }
-  if (status) { status.textContent=''; }
-  if (summary){ summary.style.display='none'; summary.innerHTML=''; }
-  document.getElementById('report-file-input').value = '';
-  document.getElementById('upload-modal').classList.add('open');
-  ensurePasteReportPanel();
+  if (area) { area.style.borderColor=''; area.style.background=''; }
+  const fileInput = document.getElementById('report-file-input');
+  if (fileInput) fileInput.value = '';
+  const existingModal = document.getElementById('upload-modal');
+  if (existingModal) existingModal.classList.add('open');
+
+  // Self-contained paste-based import — independent of whatever your
+  // existing upload-modal's internal structure looks like.
+  openPasteReportModal();
 }
 
 
@@ -1268,12 +1319,20 @@ function switchImportTab(name, el) {
 }
 
 function clearParseState() {
+  // Legacy elements from any pre-existing file-upload UI, if present.
   const status  = document.getElementById('parse-status');
   const summary = document.getElementById('parse-summary');
   if (status)  status.textContent = '';
   if (summary) { summary.style.display = 'none'; summary.innerHTML = ''; }
-  const ta = document.getElementById('paste-report-textarea');
-  if (ta) ta.value = '';
+
+  // This feature's own self-contained elements.
+  const prStatus  = document.getElementById('pr-status');
+  const prSummary = document.getElementById('pr-summary');
+  const prTextarea = document.getElementById('pr-textarea');
+  if (prStatus)  prStatus.textContent = '';
+  if (prSummary) { prSummary.style.display = 'none'; prSummary.innerHTML = ''; }
+  if (prTextarea) prTextarea.value = '';
+
   pendingReportUpdates = null;
 }
 
