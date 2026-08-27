@@ -374,7 +374,7 @@ function previewPastedReport(rawText) {
       <div style="margin-bottom:6px;"><strong>${existingStores.length}</strong> existing stores will be updated, <strong>${newStores.length}</strong> new stores will be added.</div>
       ${newStores.length ? `<div style="margin-bottom:6px;">New: ${newStores.map(id=>'#'+id).join(', ')}</div>` : ''}
       ${anomalies.length ? `<div style="color:#b45309;margin-bottom:6px;"><strong>${anomalies.length} thing(s) to check:</strong><br>${anomalies.map(a=>'• '+a).join('<br>')}</div>` : '<div style="color:#15803d;">No anomalies found.</div>'}
-      <button class="btn-xs btn-queue" onclick="applyPastedReport()">Apply ${storeNums.length} stores to Inventory</button>
+      <button id="pr-apply-btn" class="btn-xs btn-queue" onclick="applyPastedReport()">Apply ${storeNums.length} stores to Inventory</button>
     ` : `
       ${anomalies.length ? `<div style="color:#b45309;">${anomalies.map(a=>'• '+a).join('<br>')}</div>` : ''}
       <div style="margin-top:6px;color:#666;">First 3 non-blank lines of what was pasted, for reference:<br>
@@ -388,36 +388,50 @@ function previewPastedReport(rawText) {
 // Sheet refresh: overwrite S_jun/M_jun, preserve lastRestockedAt/note.
 async function applyPastedReport() {
   if (!pendingReportUpdates) return;
-  const entries = Object.entries(pendingReportUpdates);
+  const btn = document.getElementById('pr-apply-btn');
+  const statusEl = document.getElementById('pr-status');
+  if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
 
-  for (const [storeNum, v] of entries) {
-    const prev = stores[storeNum] || {};
-    stores[storeNum] = {
-      ...prev,
-      addr: v.addr, city: v.city, zip: v.zip,
-      S_may: prev.S_jun !== undefined ? clamp(prev.S_jun) : 0,
-      M_may: prev.M_jun !== undefined ? clamp(prev.M_jun) : 0,
-      S_jun: v.spicy !== null ? v.spicy : clamp(prev.S_jun),
-      M_jun: v.mild  !== null ? v.mild  : clamp(prev.M_jun),
-    };
-  }
+  try {
+    const entries = Object.entries(pendingReportUpdates);
 
-  // Persist all touched stores as overrides + best-effort Sheet push.
-  const saved = JSON.parse(localStorage.getItem('ac_stores')||'{}');
-  for (const [storeNum] of entries) {
-    saved[storeNum] = stores[storeNum];
-  }
-  localStorage.setItem('ac_stores', JSON.stringify(saved));
-  if (typeof sheetAddStore === 'function') {
-    for (const [storeNum] of entries) {
-      try { await sheetAddStore({ storeId: storeNum, ...stores[storeNum] }); } catch(e) { /* best effort */ }
+    for (const [storeNum, v] of entries) {
+      const prev = stores[storeNum] || {};
+      stores[storeNum] = {
+        ...prev,
+        addr: v.addr, city: v.city, zip: v.zip,
+        S_may: prev.S_jun !== undefined ? clamp(prev.S_jun) : 0,
+        M_may: prev.M_jun !== undefined ? clamp(prev.M_jun) : 0,
+        S_jun: v.spicy !== null ? v.spicy : clamp(prev.S_jun),
+        M_jun: v.mild  !== null ? v.mild  : clamp(prev.M_jun),
+      };
     }
-  }
 
-  pendingReportUpdates = null;
-  renderInventory();
-  closePasteReportModal();
-  clearParseState();
+    // Persist all touched stores as overrides + best-effort Sheet push.
+    const saved = JSON.parse(localStorage.getItem('ac_stores')||'{}');
+    for (const [storeNum] of entries) {
+      saved[storeNum] = stores[storeNum];
+    }
+    localStorage.setItem('ac_stores', JSON.stringify(saved));
+
+    if (typeof sheetAddStore === 'function') {
+      for (const [storeNum] of entries) {
+        try { await sheetAddStore({ storeId: storeNum, ...stores[storeNum] }); } catch(e) { console.warn('sheetAddStore failed for store', storeNum, e); }
+      }
+    }
+
+    const count = entries.length;
+    pendingReportUpdates = null;
+    renderInventory();
+
+    if (statusEl) statusEl.textContent = `✅ Applied ${count} stores to Inventory. Check the Inventory tab — you can close this window now.`;
+    const summaryEl = document.getElementById('pr-summary');
+    if (summaryEl) summaryEl.style.display = 'none';
+  } catch (err) {
+    console.error('applyPastedReport failed:', err);
+    if (statusEl) statusEl.textContent = `⚠️ Apply failed: ${err.message}. Open the browser console (F12 → Console tab) and share the red error text so I can fix it.`;
+    if (btn) { btn.disabled = false; btn.textContent = 'Retry apply'; }
+  }
 }
 
 // ── Self-contained "Paste report" popup ──────────────────────────
