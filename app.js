@@ -1,12 +1,15 @@
 // ============================================================
-// AUNT CAROL'S SAUCE — APP LOGIC  v4
+// AUNT CAROL'S SAUCE — APP LOGIC  v5
 // Storage: Google Sheets (primary) + localStorage (offline cache)
-// v4 changes: GPS links now render as an explicit "📍 GPS" text
-//             link (not just a tiny icon that CSS could hide/shrink),
-//             and delivered-quantity recording lets you pick which
-//             SKU(s) actually went out — Both / Spicy only / Mild only —
-//             instead of forcing both every time. Queue defaults now
-//             only propose the SKU(s) actually low/out, not both blindly.
+// v5 changes: the Inventory ("homepage") list now shows each store's
+//             in-flight delivery status and lets you update it inline
+//             (mark out / delivered — both/spicy-only/mild-only / failed
+//             / edit) without switching tabs. The list also auto-sorts
+//             stores that still need attention (pending/out delivery,
+//             or low/urgent stock with nothing queued) to the top and
+//             sinks finished ones to the bottom, on top of whatever
+//             sort mode is selected — so it rearranges itself as you
+//             work through deliveries.
 // ============================================================
 
 // ── State ───────────────────────────────────────────────────
@@ -124,6 +127,24 @@ function bigDrop(id) {
   return (clamp(d.S_may)-clamp(d.S_jun) >= 5) || (clamp(d.M_may)-clamp(d.M_jun) >= 5);
 }
 
+// ── Store ↔ delivery linkage ─────────────────────────────────────
+// The most recently touched delivery record for a store, or null.
+function getLatestDeliveryForStore(storeId) {
+  const list = deliveries.filter(d => d.storeId === storeId);
+  if (!list.length) return null;
+  return list.slice().sort((a,b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0];
+}
+// True if this store still needs eyes on it: a delivery is actively
+// in flight (pending/out), or stock is low/urgent with nothing queued.
+function storeNeedsAttention(storeId) {
+  const d = stores[storeId]; if (!d) return false;
+  const st = stockStatus(clamp(d.S_jun), clamp(d.M_jun));
+  const latest = getLatestDeliveryForStore(storeId);
+  if (latest && (latest.status === 'pending' || latest.status === 'out')) return true;
+  if (!latest && (st === 'urgent' || st === 'low')) return true;
+  return false;
+}
+
 // ── GPS / Maps helpers ──────────────────────────────────────────
 // Build a maps search link from raw address parts (works for any
 // address — current store record or a delivery's own snapshot).
@@ -172,13 +193,43 @@ function renderAll() {
 }
 
 // ══════════════════════════════════════════════════════════════
-// INVENTORY TAB
+// INVENTORY TAB  (the "homepage")
 // ══════════════════════════════════════════════════════════════
 function setInvFilter(f, el) {
   invFilter = f;
   document.querySelectorAll('#tab-inventory .pill').forEach(p => p.classList.remove('active'));
   el.classList.add('active');
   renderInventory();
+}
+
+// Inline delivery controls shown in each Inventory row's action cell.
+// Mirrors the Deliveries-tab quick actions so you never have to leave
+// the homepage to move a store's delivery along.
+function renderInvDeliveryControls(storeId) {
+  const d = getLatestDeliveryForStore(storeId);
+
+  if (!d || d.status === 'delivered' || d.status === 'failed') {
+    const label = d?.status === 'delivered' ? '✅ Delivered — Queue again'
+                : d?.status === 'failed'    ? '❌ Failed — Requeue'
+                : '+ Queue';
+    return `<button class="btn-xs btn-queue" onclick="queueDelivery(${storeId})">${label}</button>`;
+  }
+
+  const statusTxt = d.status === 'out' ? '🚚 Out' : '⏳ Pending';
+  return `
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+      <span class="badge" style="font-size:11px;">${statusTxt}</span>
+      ${d.status!=='out' ? `<button class="btn-xs btn-update" onclick="quickUpdateStatus('${d.id}','out')" title="Mark out for delivery">🚚</button>` : ''}
+      <select class="btn-xs" style="padding:2px 4px;"
+        onchange="if(this.value){handleQuickDeliver('${d.id}', this.value); this.selectedIndex=0;}">
+        <option value="">✅ Delivered…</option>
+        <option value="both">Both SKUs</option>
+        <option value="spicy">Spicy only</option>
+        <option value="mild">Mild only</option>
+      </select>
+      <button class="btn-xs btn-del" onclick="quickUpdateStatus('${d.id}','failed')" title="Mark failed">❌</button>
+      <button class="btn-xs btn-update" onclick="openStatusModal('${d.id}')" title="Edit driver / notes / quantities">✎</button>
+    </div>`;
 }
 
 function renderInventory() {
@@ -219,7 +270,7 @@ function renderInventory() {
     return true;
   });
 
-  // Sort
+  // Primary sort (whatever the user picked)
   filtered.sort((a, b) => {
     if (sortBy==='store') return a-b;
     if (sortBy==='city')  return stores[a].city.localeCompare(stores[b].city);
@@ -229,6 +280,17 @@ function renderInventory() {
     const sb=stockStatus(clamp(stores[b].S_jun),clamp(stores[b].M_jun));
     if (sa!==sb) return statusOrder[sa]-statusOrder[sb];
     return a-b;
+  });
+
+  // Secondary pass: whatever still needs attention (an in-flight
+  // delivery, or low/urgent stock with nothing queued) floats to the
+  // top; stores that are done sink to the bottom. Array.sort is
+  // stable, so within each group the primary sort order above holds —
+  // this just re-groups it as deliveries get updated.
+  filtered.sort((a, b) => {
+    const na = storeNeedsAttention(a) ? 0 : 1;
+    const nb = storeNeedsAttention(b) ? 0 : 1;
+    return na - nb;
   });
 
   document.getElementById('inv-count').textContent =
@@ -246,6 +308,7 @@ function renderInventory() {
     const ms  = clamp(d.S_may), mm = clamp(d.M_may);
     const st  = stockStatus(js, jm);
     const dS  = js-ms, dM = jm-mm;
+    const done = !storeNeedsAttention(id);
 
     const badge = st==='urgent'
       ? `<span class="badge badge-urgent">Both out</span>`
@@ -263,7 +326,7 @@ function renderInventory() {
            : `<span class="delta delta-nc">—</span>`;
     }
 
-    return `<tr>
+    return `<tr${done ? ' style="opacity:0.6;"' : ''}>
       <td><strong>#${id}</strong></td>
       <td class="addr-cell">${d.addr}</td>
       <td>${d.city}, VA ${d.zip}</td>
@@ -271,9 +334,9 @@ function renderInventory() {
       <td>${skuEl(js)}</td>
       <td>${skuEl(jm)}</td>
       <td>${dEl(dS)} / ${dEl(dM)}</td>
-      <td class="action-cell" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+      <td class="action-cell" style="display:flex;flex-direction:column;gap:4px;align-items:flex-start;">
         ${gpsLinkHtml(d.addr, d.city, d.zip)}
-        <button class="btn-xs btn-queue" onclick="queueDelivery(${id})">+ Queue</button>
+        ${renderInvDeliveryControls(id)}
       </td>
     </tr>`;
   }).join('');
@@ -306,6 +369,7 @@ async function queueDelivery(storeId) {
   deliveries.unshift(rec);
   saveDeliveriesLocal();
   await sheetAddDelivery(rec);
+  renderInventory();
   renderDeliveries();
   switchTab('deliveries', document.querySelector('[data-tab="deliveries"]'));
 }
@@ -455,11 +519,12 @@ async function quickUpdateStatus(delivId, status, delivered = null) {
     await sheetAddSale(sale);
   }
 
+  renderInventory();
   renderDeliveries();
   renderSales();
 }
 
-// Wired to the "✅ Delivered…" dropdown in each row.
+// Wired to the "✅ Delivered…" dropdown in each row (Inventory + Deliveries).
 function handleQuickDeliver(delivId, which) {
   const delivered = { spicy: which==='both'||which==='spicy', mild: which==='both'||which==='mild' };
   quickUpdateStatus(delivId, 'delivered', delivered);
@@ -491,6 +556,7 @@ async function bulkUpdateFiltered(status) {
     localStorage.setItem('ac_sales', JSON.stringify(sales));
   }
 
+  renderInventory();
   renderDeliveries();
   renderSales();
 }
@@ -549,6 +615,7 @@ async function saveStatus() {
     await sheetAddSale(sale);
   }
 
+  renderInventory();
   renderDeliveries();
   renderSales();
   closeModal('status-modal');
@@ -559,6 +626,7 @@ async function deleteDelivery(delivId) {
   deliveries = deliveries.filter(x => String(x.id)!==String(delivId));
   saveDeliveriesLocal();
   await sheetDeleteDelivery(delivId);
+  renderInventory();
   renderDeliveries();
 }
 
@@ -616,6 +684,7 @@ async function saveRun() {
   deliveries.unshift(...newRecs);
   saveDeliveriesLocal();
   await Promise.all(newRecs.map(r=>sheetAddDelivery(r)));
+  renderInventory();
   renderDeliveries();
   closeModal('run-modal');
   switchTab('deliveries', document.querySelector('[data-tab="deliveries"]'));
