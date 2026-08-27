@@ -1,9 +1,12 @@
 // ============================================================
-// AUNT CAROL'S SAUCE — APP LOGIC  v3
+// AUNT CAROL'S SAUCE — APP LOGIC  v4
 // Storage: Google Sheets (primary) + localStorage (offline cache)
-// v3 changes: one-tap status updates, bulk filtered actions,
-//             GPS links everywhere (rows, run modal, dispatch text),
-//             smarter queue defaults
+// v4 changes: GPS links now render as an explicit "📍 GPS" text
+//             link (not just a tiny icon that CSS could hide/shrink),
+//             and delivered-quantity recording lets you pick which
+//             SKU(s) actually went out — Both / Spicy only / Mild only —
+//             instead of forcing both every time. Queue defaults now
+//             only propose the SKU(s) actually low/out, not both blindly.
 // ============================================================
 
 // ── State ───────────────────────────────────────────────────
@@ -123,7 +126,7 @@ function bigDrop(id) {
 
 // ── GPS / Maps helpers ──────────────────────────────────────────
 // Build a maps search link from raw address parts (works for any
-// address, current store record or a delivery's own snapshot).
+// address — current store record or a delivery's own snapshot).
 function mapsUrlForAddress(addr, city, zip) {
   return `https://www.google.com/maps/search/${encodeURIComponent(addr+', '+city+', VA '+zip)}`;
 }
@@ -132,6 +135,17 @@ function mapsUrl(id) {
   const d = stores[id];
   if (!d) return '#';
   return mapsUrlForAddress(d.addr, d.city, d.zip);
+}
+// Rendered HTML for a GPS link. Uses inline styles (not just a CSS
+// class) so it always shows up as a visible pill regardless of what
+// .map-link is (or isn't) styled as in the page's stylesheet.
+function gpsLinkHtml(addr, city, zip) {
+  const url = mapsUrlForAddress(addr, city, zip);
+  return `<a href="${url}" target="_blank" class="map-link"
+    style="display:inline-flex;align-items:center;gap:3px;padding:2px 6px;
+           border:1px solid var(--border,#ccc);border-radius:6px;
+           font-size:12px;text-decoration:none;white-space:nowrap;"
+    title="Open in Maps">📍 GPS</a>`;
 }
 // Multi-stop turn-by-turn route (Google Maps supports this without an API key).
 function buildRouteUrl(addrList) {
@@ -257,8 +271,8 @@ function renderInventory() {
       <td>${skuEl(js)}</td>
       <td>${skuEl(jm)}</td>
       <td>${dEl(dS)} / ${dEl(dM)}</td>
-      <td class="action-cell">
-        <a class="map-link" href="${mapsUrl(id)}" target="_blank" title="Open in Maps">📍</a>
+      <td class="action-cell" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+        ${gpsLinkHtml(d.addr, d.city, d.zip)}
         <button class="btn-xs btn-queue" onclick="queueDelivery(${id})">+ Queue</button>
       </td>
     </tr>`;
@@ -266,14 +280,19 @@ function renderInventory() {
 }
 
 // ── Queue single store from inventory ─────────────────────────
-// Smarter defaults: whichever SKU is fully out gets 2 cases queued
-// instead of 1, and the note flags urgency for the driver.
+// Only proposes the SKU(s) actually low/out — if spicy is well
+// stocked, it won't force a spicy case into the delivery just
+// because mild needs one, and vice versa. If the store's fine on
+// both (rare reason to hit Queue), it falls back to a 1/1 top-up.
 async function queueDelivery(storeId) {
   const d = stores[storeId]; if (!d) return;
   const s = clamp(d.S_jun), m = clamp(d.M_jun);
   const st = stockStatus(s, m);
-  const spicyQty = s === 0 ? 2 : 1;
-  const mildQty  = m === 0 ? 2 : 1;
+
+  let spicyQty = s === 0 ? 2 : s <= 3 ? 1 : 0;
+  let mildQty  = m === 0 ? 2 : m <= 3 ? 1 : 0;
+  if (spicyQty === 0 && mildQty === 0) { spicyQty = 1; mildQty = 1; }
+
   const autoNote = st === 'urgent' ? 'Urgent restock — both SKUs out'
                  : st === 'low'    ? 'Low stock restock'
                  : '';
@@ -314,7 +333,7 @@ function ensureDeliveryToolbar() {
   bar.innerHTML = `
     <button class="btn-xs btn-queue" onclick="openRouteForFiltered()">🗺️ Route (filtered)</button>
     <button class="btn-xs btn-update" onclick="bulkUpdateFiltered('out')">🚚 Mark filtered Out</button>
-    <button class="btn-xs btn-queue" onclick="bulkUpdateFiltered('delivered')">✅ Mark filtered Delivered</button>
+    <button class="btn-xs btn-queue" onclick="bulkUpdateFiltered('delivered')">✅ Mark filtered Delivered (both SKUs)</button>
     <button class="btn-xs btn-del" onclick="bulkUpdateFiltered('failed')">❌ Mark filtered Failed</button>
   `;
   stats.insertAdjacentElement('afterend', bar);
@@ -372,7 +391,20 @@ function renderDeliveries() {
   tbody.innerHTML = filtered.map(d => {
     const cases = clamp(d.spicy)+clamp(d.mild);
     const rev   = cases * PRICING.casePrice;
-    const gps   = mapsUrlForAddress(d.addr, d.city, d.zip);
+
+    // Quick-deliver control: pick which SKU(s) actually went out.
+    // This zeroes whichever one wasn't delivered rather than always
+    // recording both, so partial deliveries (e.g. only had spicy on
+    // the truck) get logged correctly without opening the edit modal.
+    const quickDeliverHtml = d.status!=='delivered' ? `
+      <select class="btn-xs" style="padding:2px 4px;"
+        onchange="if(this.value){handleQuickDeliver('${d.id}', this.value); this.selectedIndex=0;}">
+        <option value="">✅ Delivered…</option>
+        <option value="both">Both SKUs</option>
+        <option value="spicy">Spicy only</option>
+        <option value="mild">Mild only</option>
+      </select>` : '';
+
     return `<tr>
       <td><strong>#${d.storeId}</strong></td>
       <td class="addr-cell">${d.addr}<br><small style="color:var(--ink3)">${d.city}, VA ${d.zip}</small></td>
@@ -383,11 +415,11 @@ function renderDeliveries() {
       <td>${d.driver || '<span style="color:var(--ink4)">Unassigned</span>'}</td>
       <td>${fmtDate(d.date)}</td>
       <td>${statusLabel[d.status] || d.status}</td>
-      <td class="action-cell">
-        <a class="map-link" href="${gps}" target="_blank" title="Open in Maps">📍</a>
-        ${d.status!=='out'       ? `<button class="btn-xs btn-update" onclick="quickUpdateStatus('${d.id}','out')" title="Mark out for delivery">🚚</button>` : ''}
-        ${d.status!=='delivered' ? `<button class="btn-xs btn-queue"  onclick="quickUpdateStatus('${d.id}','delivered')" title="Mark delivered">✅</button>` : ''}
-        ${d.status!=='failed'    ? `<button class="btn-xs btn-del"    onclick="quickUpdateStatus('${d.id}','failed')" title="Mark failed">❌</button>` : ''}
+      <td class="action-cell" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+        ${gpsLinkHtml(d.addr, d.city, d.zip)}
+        ${d.status!=='out'    ? `<button class="btn-xs btn-update" onclick="quickUpdateStatus('${d.id}','out')" title="Mark out for delivery">🚚</button>` : ''}
+        ${quickDeliverHtml}
+        ${d.status!=='failed' ? `<button class="btn-xs btn-del" onclick="quickUpdateStatus('${d.id}','failed')" title="Mark failed">❌</button>` : ''}
         <button class="btn-xs btn-update" onclick="openStatusModal('${d.id}')" title="Edit driver / notes / quantities">✎</button>
         <button class="btn-xs btn-del" onclick="deleteDelivery('${d.id}')" title="Delete">×</button>
       </td>
@@ -396,13 +428,21 @@ function renderDeliveries() {
 }
 
 // ── One-tap status update (no modal) ───────────────────────────
-// Used by the inline 🚚 / ✅ / ❌ buttons. Keeps existing driver,
-// notes, and case counts — use the ✎ edit modal to change those.
-async function quickUpdateStatus(delivId, status) {
+// delivered = {spicy: bool, mild: bool} — which SKU(s) actually went
+// out. Whichever is false gets zeroed before the sale is recorded,
+// so partial deliveries log correctly. Omit for out/failed (quantities
+// don't matter for those statuses).
+async function quickUpdateStatus(delivId, status, delivered = null) {
   const d = deliveries.find(x => String(x.id)===String(delivId));
   if (!d) return;
   d.status    = status;
   d.updatedAt = new Date().toISOString();
+
+  if (status === 'delivered' && delivered) {
+    if (!delivered.spicy) d.spicy = 0;
+    if (!delivered.mild)  d.mild  = 0;
+  }
+
   saveDeliveriesLocal();
   await sheetUpdateDelivery(d);
 
@@ -419,7 +459,15 @@ async function quickUpdateStatus(delivId, status) {
   renderSales();
 }
 
+// Wired to the "✅ Delivered…" dropdown in each row.
+function handleQuickDeliver(delivId, which) {
+  const delivered = { spicy: which==='both'||which==='spicy', mild: which==='both'||which==='mild' };
+  quickUpdateStatus(delivId, 'delivered', delivered);
+}
+
 // ── Bulk update everything currently visible in the Deliveries tab ──
+// Note: the bulk "Delivered" action records BOTH SKUs for every row —
+// for partial deliveries, use the per-row dropdown instead.
 async function bulkUpdateFiltered(status) {
   const list = currentFilteredDeliveries.filter(d=>d.status!==status);
   if (!list.length) { alert('Nothing to update in the current view.'); return; }
@@ -530,15 +578,15 @@ function createDeliveryRun() {
     const st = stockStatus(s, m);
     const pre= st==='urgent'||st==='low';
     const em = st==='urgent'?'🔴':st==='low'?'🟡':'✅';
-    // Link is a sibling of the label (not nested inside it) so tapping
-    // 📍 opens Maps instead of toggling the checkbox.
+    // GPS link is a sibling of the label (not nested inside it) so
+    // tapping it opens Maps instead of toggling the checkbox.
     return `<div class="store-check-item" style="display:flex;align-items:center;gap:8px;">
       <label style="display:flex;align-items:center;gap:8px;flex:1;cursor:pointer;">
         <input type="checkbox" value="${id}" ${pre?'checked':''}>
         <span>${em} #${id} — ${d.addr}, ${d.city}</span>
         <small>Spicy:${s} Mild:${m}</small>
       </label>
-      <a class="map-link" href="${mapsUrl(id)}" target="_blank" title="Open in Maps">📍</a>
+      ${gpsLinkHtml(d.addr, d.city, d.zip)}
     </div>`;
   }).join('');
 
