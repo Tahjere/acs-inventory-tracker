@@ -178,7 +178,11 @@ function storeNeedsAttention(storeId) {
   const st = stockStatus(clamp(d.S_jun), clamp(d.M_jun));
   const latest = getLatestDeliveryForStore(storeId);
   if (latest && (latest.status === 'pending' || latest.status === 'out')) return true;
-  if (!latest && (st === 'urgent' || st === 'low')) return true;
+  // Current stock always counts, regardless of past delivery history —
+  // a store that had one SKU restocked but is still low/out on the
+  // other one still needs attention, even though its last delivery is
+  // already marked "delivered".
+  if (st === 'urgent' || st === 'low') return true;
   return false;
 }
 
