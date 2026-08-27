@@ -1,22 +1,31 @@
 // ============================================================
-// AUNT CAROL'S SAUCE — APP LOGIC  v5
+// AUNT CAROL'S SAUCE — APP LOGIC  v7
 // Storage: Google Sheets (primary) + localStorage (offline cache)
-// v5 changes: the Inventory ("homepage") list now shows each store's
-//             in-flight delivery status and lets you update it inline
-//             (mark out / delivered — both/spicy-only/mild-only / failed
-//             / edit) without switching tabs. The list also auto-sorts
-//             stores that still need attention (pending/out delivery,
-//             or low/urgent stock with nothing queued) to the top and
-//             sinks finished ones to the bottom, on top of whatever
-//             sort mode is selected — so it rearranges itself as you
-//             work through deliveries.
+// v7 changes: adds a working "paste report" parser for the Food Lion
+//             scan-report format (store #, address, city, state, zip,
+//             UPC, product name, quantity — repeated per SKU per
+//             store). Splits pasted text into 8-line records, reads
+//             spicy/mild off the UPC suffix (...950/...951) with the
+//             product name as a fallback, handles "(3.00)"-style
+//             negative notation, and shows a review summary (updated
+//             stores / new stores / anomalies like negatives) before
+//             applying anything. Applying merges into `stores` the
+//             same way a Sheet refresh does — S_jun/M_jun get the new
+//             counts, lastRestockedAt/lastRestockNote are preserved.
+//
+// NOTE: I don't have your existing report-file-input parsing logic
+// (it wasn't in the file shared with me), so this is a new, separate
+// "Paste report" path added to the same upload modal — it doesn't
+// touch or replace whatever your file-upload flow already does.
 // ============================================================
 
 // ── State ───────────────────────────────────────────────────
 let stores      = {};   // merged BASE_STORES + sheet/localStorage additions
 let deliveries  = [];   // from Sheet (or localStorage fallback)
 let currentEditId = null;
+let currentEditSaleId = null;
 let currentFilteredDeliveries = []; // snapshot of what's on-screen, for bulk actions
+let pendingReportUpdates = null;    // staged result from parsePastedReport, awaiting confirm
 
 let invFilter   = 'all';
 let delFilter   = 'all';
@@ -67,7 +76,11 @@ async function refreshFromSheet() {
   }
   if (sheetStores && sheetStores.length) {
     sheetStores.forEach(s => {
+      // Preserve locally-tracked restock history — the report only
+      // carries the raw counts, not lastRestockedAt/lastRestockNote.
+      const prev = stores[s.storeId] || {};
       stores[s.storeId] = {
+        ...prev,
         addr: s.addr, city: s.city, zip: s.zip,
         S_may: Number(s.S_may)||0, M_may: Number(s.M_may)||0,
         S_jun: Number(s.S_jun)||0, M_jun: Number(s.M_jun)||0,
@@ -89,6 +102,10 @@ function normalizeDelivery(d) {
     spicy: Number(d.spicy)||0, mild: Number(d.mild)||0,
     driver: d.driver||'', date: d.date||today(),
     status: d.status||'pending', notes: d.notes||'',
+    // How much of this delivery's spicy/mild has already been applied
+    // to store stock — used to avoid double-counting on edits/reloads.
+    appliedSpicy: Number(d.appliedSpicy)||0,
+    appliedMild:  Number(d.appliedMild)||0,
     createdAt: d.createdAt||new Date().toISOString(),
     updatedAt: d.updatedAt||new Date().toISOString(),
   };
@@ -145,6 +162,52 @@ function storeNeedsAttention(storeId) {
   return false;
 }
 
+// Save a store record locally and best-effort push it to the Sheet so
+// the stock change survives a refresh. ASSUMES sheetAddStore upserts
+// by storeId — if your backend only inserts new rows, this won't
+// stick past the next Sheet pull (localStorage will still be correct
+// on this device though).
+async function persistStoreOverride(id, storeRec) {
+  const saved = JSON.parse(localStorage.getItem('ac_stores')||'{}');
+  saved[id] = storeRec;
+  localStorage.setItem('ac_stores', JSON.stringify(saved));
+  if (typeof sheetAddStore === 'function') {
+    try { await sheetAddStore({ storeId:id, ...storeRec }); } catch(e) { /* best effort */ }
+  }
+}
+
+// Apply (or reverse) a delivery's effect on its store's live stock.
+// isNowDelivered=true moves the store's stock toward "already has
+// d.spicy/d.mild extra on the shelf"; false moves it back toward zero
+// extra. Diffs against what was previously applied, so calling this
+// again after an edit only adds/removes the difference.
+async function reconcileDeliveryStock(d, isNowDelivered) {
+  const store = stores[d.storeId];
+  if (!store) return;
+
+  const targetSpicy = isNowDelivered ? clamp(d.spicy) : 0;
+  const targetMild  = isNowDelivered ? clamp(d.mild)  : 0;
+  const deltaSpicy  = targetSpicy - (d.appliedSpicy || 0);
+  const deltaMild   = targetMild  - (d.appliedMild  || 0);
+
+  if (deltaSpicy !== 0 || deltaMild !== 0) {
+    store.S_jun = clamp(clamp(store.S_jun) + deltaSpicy);
+    store.M_jun = clamp(clamp(store.M_jun) + deltaMild);
+
+    if (deltaSpicy > 0 || deltaMild > 0) {
+      store.lastRestockedAt = new Date().toISOString();
+      const parts = [];
+      if (deltaSpicy > 0) parts.push(`Spicy +${deltaSpicy}`);
+      if (deltaMild  > 0) parts.push(`Mild +${deltaMild}`);
+      store.lastRestockNote = parts.join(', ') + (d.driver ? ` via ${d.driver}` : '');
+    }
+    await persistStoreOverride(d.storeId, store);
+  }
+
+  d.appliedSpicy = targetSpicy;
+  d.appliedMild  = targetMild;
+}
+
 // ── GPS / Maps helpers ──────────────────────────────────────────
 // Build a maps search link from raw address parts (works for any
 // address — current store record or a delivery's own snapshot).
@@ -190,6 +253,164 @@ function renderAll() {
   renderInventory();
   renderDeliveries();
   renderSales();
+}
+
+// ══════════════════════════════════════════════════════════════
+// PASTE-REPORT PARSER  (Food Lion scan-report format)
+// ══════════════════════════════════════════════════════════════
+// Expects repeating 8-line records with blank lines allowed anywhere
+// (they're stripped before chunking):
+//   store#
+//   address
+//   city
+//   state
+//   zip
+//   UPC
+//   product name  (contains "SPC" or "MLD", or UPC ends 950/951)
+//   quantity      (e.g. "12.00" or "(3.00)" for a negative)
+function parsePastedReport(rawText) {
+  const nonBlank = rawText.split('\n').map(l => l.trim()).filter(l => l !== '');
+  const results = [];
+  const anomalies = [];
+
+  for (let i = 0; i < nonBlank.length; ) {
+    const chunk = nonBlank.slice(i, i + 8);
+    if (chunk.length < 8) {
+      if (chunk.length > 0) anomalies.push(`Incomplete record at the end: ${chunk.join(' | ')}`);
+      break;
+    }
+    const [storeNum, addr, city, state, zip, upc, product, qtyRaw] = chunk;
+
+    if (!/^\d+$/.test(storeNum)) {
+      anomalies.push(`Expected a store number, got "${storeNum}" — skipping one line and resyncing.`);
+      i += 1;
+      continue;
+    }
+
+    let qtyStr = qtyRaw.trim();
+    let negative = false;
+    if (qtyStr.startsWith('(') && qtyStr.endsWith(')')) {
+      negative = true;
+      qtyStr = qtyStr.slice(1, -1);
+    }
+    const qty = parseFloat(qtyStr);
+    if (isNaN(qty)) {
+      anomalies.push(`Store #${storeNum}: couldn't read quantity "${qtyRaw}".`);
+      i += 8;
+      continue;
+    }
+    const signedQty = negative ? -qty : qty;
+    if (negative) anomalies.push(`Store #${storeNum}: ${product.includes('MLD') ? 'mild' : 'spicy'} quantity is negative (${signedQty}) — likely a return/credit, worth double-checking before trusting it as a shelf count.`);
+
+    const sku = upc.endsWith('951') || product.includes('MLD') ? 'mild'
+              : upc.endsWith('950') || product.includes('SPC') ? 'spicy'
+              : null;
+    if (!sku) anomalies.push(`Store #${storeNum}: couldn't tell spicy vs. mild from "${product}" / UPC ${upc} — skipped.`);
+
+    results.push({ storeNum, addr, city, state, zip, upc, product, sku, qty: signedQty });
+    i += 8;
+  }
+
+  // Group into per-store updates
+  const byStore = {};
+  results.forEach(r => {
+    if (!r.sku) return;
+    if (!byStore[r.storeNum]) {
+      byStore[r.storeNum] = { addr: r.addr, city: r.city, zip: r.zip, spicy: null, mild: null };
+    }
+    byStore[r.storeNum][r.sku] = r.qty;
+  });
+
+  Object.entries(byStore).forEach(([storeNum, v]) => {
+    if (v.spicy === null || v.mild === null) {
+      anomalies.push(`Store #${storeNum}: only found one SKU in the report (spicy=${v.spicy}, mild=${v.mild}) — the missing one will be left unchanged.`);
+    }
+  });
+
+  return { byStore, anomalies, recordCount: results.length };
+}
+
+// Stage parsed results and show a review summary before touching any
+// data. Nothing is applied until applyPastedReport() is called.
+function previewPastedReport(rawText) {
+  const { byStore, anomalies, recordCount } = parsePastedReport(rawText);
+  const storeNums = Object.keys(byStore);
+
+  const newStores = storeNums.filter(id => !stores[id]);
+  const existingStores = storeNums.filter(id => stores[id]);
+
+  pendingReportUpdates = byStore;
+
+  const statusEl = document.getElementById('parse-status');
+  const summaryEl = document.getElementById('parse-summary');
+  if (statusEl) statusEl.textContent = `Parsed ${recordCount} lines across ${storeNums.length} stores.`;
+  if (summaryEl) {
+    summaryEl.style.display = 'block';
+    summaryEl.innerHTML = `
+      <div style="margin-bottom:6px;"><strong>${existingStores.length}</strong> existing stores will be updated, <strong>${newStores.length}</strong> new stores will be added.</div>
+      ${newStores.length ? `<div style="margin-bottom:6px;">New: ${newStores.map(id=>'#'+id).join(', ')}</div>` : ''}
+      ${anomalies.length ? `<div style="color:#b45309;margin-bottom:6px;"><strong>${anomalies.length} thing(s) to check:</strong><br>${anomalies.map(a=>'• '+a).join('<br>')}</div>` : '<div style="color:#15803d;">No anomalies found.</div>'}
+      <button class="btn-xs btn-queue" onclick="applyPastedReport()">Apply ${storeNums.length} stores to Inventory</button>
+    `;
+  }
+}
+
+// Actually merge the staged report into `stores`, same pattern as a
+// Sheet refresh: overwrite S_jun/M_jun, preserve lastRestockedAt/note.
+async function applyPastedReport() {
+  if (!pendingReportUpdates) return;
+  const entries = Object.entries(pendingReportUpdates);
+
+  for (const [storeNum, v] of entries) {
+    const prev = stores[storeNum] || {};
+    stores[storeNum] = {
+      ...prev,
+      addr: v.addr, city: v.city, zip: v.zip,
+      S_may: prev.S_jun !== undefined ? clamp(prev.S_jun) : 0,
+      M_may: prev.M_jun !== undefined ? clamp(prev.M_jun) : 0,
+      S_jun: v.spicy !== null ? v.spicy : clamp(prev.S_jun),
+      M_jun: v.mild  !== null ? v.mild  : clamp(prev.M_jun),
+    };
+  }
+
+  // Persist all touched stores as overrides + best-effort Sheet push.
+  const saved = JSON.parse(localStorage.getItem('ac_stores')||'{}');
+  for (const [storeNum] of entries) {
+    saved[storeNum] = stores[storeNum];
+  }
+  localStorage.setItem('ac_stores', JSON.stringify(saved));
+  if (typeof sheetAddStore === 'function') {
+    for (const [storeNum] of entries) {
+      try { await sheetAddStore({ storeId: storeNum, ...stores[storeNum] }); } catch(e) { /* best effort */ }
+    }
+  }
+
+  pendingReportUpdates = null;
+  renderInventory();
+  closeModal('upload-modal');
+  clearParseState();
+}
+
+// Builds (once) a "Paste report" panel inside the upload modal if one
+// isn't already there. Doesn't touch or replace an existing
+// file-upload flow — this is an additional textarea + button.
+function ensurePasteReportPanel() {
+  const modalBody = document.getElementById('upload-modal');
+  if (!modalBody || document.getElementById('paste-report-panel')) return;
+  const panel = document.createElement('div');
+  panel.id = 'paste-report-panel';
+  panel.style.cssText = 'margin-top:12px;';
+  panel.innerHTML = `
+    <label style="display:block;margin-bottom:6px;font-size:13px;">Paste report text (Food Lion scan-report format)</label>
+    <textarea id="paste-report-textarea" rows="8" style="width:100%;box-sizing:border-box;padding:8px;font-family:monospace;font-size:12px;"></textarea>
+    <div style="margin-top:8px;">
+      <button class="btn-xs btn-queue" onclick="previewPastedReport(document.getElementById('paste-report-textarea').value)">Parse pasted report</button>
+    </div>
+  `;
+  // Append inside whatever container holds the modal's content, falling
+  // back to the modal element itself.
+  const target = modalBody.querySelector('.modal-content') || modalBody.firstElementChild || modalBody;
+  target.appendChild(panel);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -326,6 +547,10 @@ function renderInventory() {
            : `<span class="delta delta-nc">—</span>`;
     }
 
+    const restockLine = d.lastRestockedAt
+      ? `<small style="color:var(--ink3);display:block;">Last restocked ${fmtDate(d.lastRestockedAt)}${d.lastRestockNote ? ' — '+d.lastRestockNote : ''}</small>`
+      : '';
+
     return `<tr${done ? ' style="opacity:0.6;"' : ''}>
       <td><strong>#${id}</strong></td>
       <td class="addr-cell">${d.addr}</td>
@@ -337,6 +562,7 @@ function renderInventory() {
       <td class="action-cell" style="display:flex;flex-direction:column;gap:4px;align-items:flex-start;">
         ${gpsLinkHtml(d.addr, d.city, d.zip)}
         ${renderInvDeliveryControls(id)}
+        ${restockLine}
       </td>
     </tr>`;
   }).join('');
@@ -364,6 +590,7 @@ async function queueDelivery(storeId) {
     storeId, addr:d.addr, city:d.city, zip:d.zip,
     spicy:spicyQty, mild:mildQty, driver:'', date:today(),
     status:'pending', notes:autoNote,
+    appliedSpicy:0, appliedMild:0,
     createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(),
   };
   deliveries.unshift(rec);
@@ -493,9 +720,9 @@ function renderDeliveries() {
 
 // ── One-tap status update (no modal) ───────────────────────────
 // delivered = {spicy: bool, mild: bool} — which SKU(s) actually went
-// out. Whichever is false gets zeroed before the sale is recorded,
-// so partial deliveries log correctly. Omit for out/failed (quantities
-// don't matter for those statuses).
+// out. Whichever is false gets zeroed before stock/sale are updated,
+// so partial deliveries record correctly. Reconciles the store's
+// live stock either way (adds on delivered, reverses otherwise).
 async function quickUpdateStatus(delivId, status, delivered = null) {
   const d = deliveries.find(x => String(x.id)===String(delivId));
   if (!d) return;
@@ -506,6 +733,8 @@ async function quickUpdateStatus(delivId, status, delivered = null) {
     if (!delivered.spicy) d.spicy = 0;
     if (!delivered.mild)  d.mild  = 0;
   }
+
+  await reconcileDeliveryStock(d, status === 'delivered');
 
   saveDeliveriesLocal();
   await sheetUpdateDelivery(d);
@@ -538,10 +767,11 @@ async function bulkUpdateFiltered(status) {
   if (!list.length) { alert('Nothing to update in the current view.'); return; }
   if (!confirm(`Mark ${list.length} filtered deliveries as "${status}"?`)) return;
 
-  list.forEach(d => {
+  for (const d of list) {
     d.status    = status;
     d.updatedAt = new Date().toISOString();
-  });
+    await reconcileDeliveryStock(d, status === 'delivered');
+  }
   saveDeliveriesLocal();
   await Promise.all(list.map(d=>sheetUpdateDelivery(d)));
 
@@ -603,6 +833,8 @@ async function saveStatus() {
   d.mild      = parseInt(document.getElementById('mild-delivered').value)  || 0;
   d.updatedAt = new Date().toISOString();
 
+  await reconcileDeliveryStock(d, newStatus === 'delivered');
+
   saveDeliveriesLocal();
   await sheetUpdateDelivery(d);
 
@@ -623,6 +855,8 @@ async function saveStatus() {
 
 async function deleteDelivery(delivId) {
   if (!confirm('Remove this delivery record?')) return;
+  const d = deliveries.find(x => String(x.id)===String(delivId));
+  if (d) await reconcileDeliveryStock(d, false); // undo any stock it had already applied
   deliveries = deliveries.filter(x => String(x.id)!==String(delivId));
   saveDeliveriesLocal();
   await sheetDeleteDelivery(delivId);
@@ -677,6 +911,7 @@ async function saveRun() {
       storeId:id, addr:d.addr||'', city:d.city||'', zip:d.zip||'',
       spicy:1, mild:1, driver, date,
       status:'pending', notes:'',
+      appliedSpicy:0, appliedMild:0,
       createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(),
     };
   });
@@ -718,7 +953,18 @@ function setSalesFilter(f, el) {
   renderSales();
 }
 
+// Add a "Detail (editable)" option to the existing group-by select if
+// it's not already there. Safe/idempotent — just extends whatever
+// dropdown your HTML already has, no markup assumptions beyond that.
+function ensureSalesGroupDetailOption() {
+  const sg = document.getElementById('sales-group');
+  if (!sg || sg.querySelector('option[value="detail"]')) return;
+  sg.insertAdjacentHTML('beforeend', `<option value="detail">Detail (editable)</option>`);
+}
+
 function renderSales() {
+  ensureSalesGroupDetailOption();
+
   const all   = JSON.parse(localStorage.getItem('ac_sales')||'[]');
   const groupBy = document.getElementById('sales-group')?.value || 'store';
 
@@ -796,6 +1042,26 @@ function renderSales() {
       <td class="num-cell">${fmtCur(r.revenue)}</td>
       <td class="num-cell green-text">${fmtCur(r.gp)}</td>
     </tr>`).join('');
+  } else if (groupBy==='detail') {
+    // Individual, editable sale records — not aggregated.
+    const rows = filtered.slice().sort((a,b)=> new Date(b.date) - new Date(a.date));
+    thead.innerHTML = `<th>Date</th><th>Store</th><th>🌶️ Spicy</th><th>🧡 Mild</th><th>Driver</th><th>Revenue</th><th>Gross profit</th><th>Actions</th>`;
+    tbody.innerHTML = rows.map(r=>{
+      const st = stores[r.storeId] || {};
+      return `<tr>
+        <td>${fmtDate(r.date)}</td>
+        <td><strong>#${r.storeId}</strong>${st.addr ? ' — '+st.addr : ''}</td>
+        <td>${r.spicyCases}</td>
+        <td>${r.mildCases}</td>
+        <td>${r.driver || '<span style="color:var(--ink4)">—</span>'}</td>
+        <td class="num-cell">${fmtCur(r.revenue)}</td>
+        <td class="num-cell green-text">${fmtCur(r.grossProfit)}</td>
+        <td class="action-cell">
+          <button class="btn-xs btn-update" onclick="openSaleEditModal('${r.deliveryId}')" title="Edit">✎</button>
+          <button class="btn-xs btn-del" onclick="deleteSaleRecord('${r.deliveryId}')" title="Delete">×</button>
+        </td>
+      </tr>`;
+    }).join('');
   } else {
     const spicyRev=totalSpc*PRICING.casePrice, mildRev=totalMld*PRICING.casePrice;
     thead.innerHTML = `<th>SKU</th><th>Cases sold</th><th>Units sold</th><th>Revenue</th>`;
@@ -807,6 +1073,108 @@ function renderSales() {
         <td class="num-cell">${fmtCur(spicyRev+mildRev)}</td>
       </tr>`;
   }
+}
+
+// ── Sales record edit modal (built entirely in JS, no HTML dependency) ──
+function ensureSalesEditModal() {
+  if (document.getElementById('sale-edit-modal')) return;
+  const modal = document.createElement('div');
+  modal.id = 'sale-edit-modal';
+  modal.style.cssText = `
+    display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5);
+    z-index:9999; align-items:center; justify-content:center;
+  `;
+  modal.innerHTML = `
+    <div style="background:var(--bg,#fff); color:var(--ink,#111); padding:20px; border-radius:10px; width:320px; max-width:90vw; font-family:inherit;">
+      <h3 style="margin:0 0 12px;">Edit sale record</h3>
+      <label style="display:block;margin-bottom:8px;font-size:13px;">Date<br>
+        <input id="se-date" type="date" style="width:100%;padding:6px;box-sizing:border-box;">
+      </label>
+      <label style="display:block;margin-bottom:8px;font-size:13px;">Driver<br>
+        <input id="se-driver" type="text" style="width:100%;padding:6px;box-sizing:border-box;">
+      </label>
+      <label style="display:block;margin-bottom:8px;font-size:13px;">Spicy cases<br>
+        <input id="se-spicy" type="number" min="0" style="width:100%;padding:6px;box-sizing:border-box;">
+      </label>
+      <label style="display:block;margin-bottom:8px;font-size:13px;">Mild cases<br>
+        <input id="se-mild" type="number" min="0" style="width:100%;padding:6px;box-sizing:border-box;">
+      </label>
+      <small style="color:#888;display:block;margin-bottom:10px;">
+        Revenue and profit recalculate from these counts. This only
+        corrects the sales record — it won't change today's live stock.
+      </small>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn-xs" onclick="closeSaleEditModal()">Cancel</button>
+        <button class="btn-xs btn-queue" onclick="saveSaleEdit()">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+function openSaleEditModal(deliveryId) {
+  ensureSalesEditModal();
+  const all = JSON.parse(localStorage.getItem('ac_sales')||'[]');
+  const sale = all.find(s=>String(s.deliveryId)===String(deliveryId));
+  if (!sale) return;
+  currentEditSaleId = deliveryId;
+  document.getElementById('se-date').value   = sale.date || today();
+  document.getElementById('se-driver').value = sale.driver || '';
+  document.getElementById('se-spicy').value  = sale.spicyCases || 0;
+  document.getElementById('se-mild').value   = sale.mildCases  || 0;
+  document.getElementById('sale-edit-modal').style.display = 'flex';
+}
+
+function closeSaleEditModal() {
+  const m = document.getElementById('sale-edit-modal');
+  if (m) m.style.display = 'none';
+  currentEditSaleId = null;
+}
+
+async function saveSaleEdit() {
+  if (!currentEditSaleId) return;
+  const all = JSON.parse(localStorage.getItem('ac_sales')||'[]');
+  const idx = all.findIndex(s=>String(s.deliveryId)===String(currentEditSaleId));
+  if (idx < 0) return;
+
+  const spicy = parseInt(document.getElementById('se-spicy').value) || 0;
+  const mild  = parseInt(document.getElementById('se-mild').value)  || 0;
+  const cases = spicy + mild;
+
+  all[idx] = {
+    ...all[idx],
+    date:   document.getElementById('se-date').value || all[idx].date,
+    driver: document.getElementById('se-driver').value.trim(),
+    spicyCases: spicy,
+    mildCases:  mild,
+    totalCases: cases,
+    spicyUnits: spicy*PRICING.unitsPerCase,
+    mildUnits:  mild*PRICING.unitsPerCase,
+    revenue:     cases*PRICING.casePrice,
+    cogs:        cases*PRICING.unitsPerCase*PRICING.unitCost,
+    grossProfit: (cases*PRICING.casePrice)-(cases*PRICING.unitsPerCase*PRICING.unitCost)-PRICING.deliveryFeePerVisit,
+  };
+  localStorage.setItem('ac_sales', JSON.stringify(all));
+
+  if (typeof sheetUpdateSale === 'function') {
+    try { await sheetUpdateSale(all[idx]); } catch(e) { /* best effort — no backend hook yet */ }
+  }
+
+  closeSaleEditModal();
+  renderSales();
+}
+
+async function deleteSaleRecord(deliveryId) {
+  if (!confirm('Delete this sale record? This only removes it from Sales History — it will not change the original delivery.')) return;
+  let all = JSON.parse(localStorage.getItem('ac_sales')||'[]');
+  const rec = all.find(s=>String(s.deliveryId)===String(deliveryId));
+  all = all.filter(s=>String(s.deliveryId)!==String(deliveryId));
+  localStorage.setItem('ac_sales', JSON.stringify(all));
+
+  if (typeof sheetDeleteSale === 'function' && rec) {
+    try { await sheetDeleteSale(rec); } catch(e) { /* best effort — no backend hook yet */ }
+  }
+
+  renderSales();
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -887,6 +1255,7 @@ function openUploadModal() {
   if (summary){ summary.style.display='none'; summary.innerHTML=''; }
   document.getElementById('report-file-input').value = '';
   document.getElementById('upload-modal').classList.add('open');
+  ensurePasteReportPanel();
 }
 
 
@@ -903,6 +1272,9 @@ function clearParseState() {
   const summary = document.getElementById('parse-summary');
   if (status)  status.textContent = '';
   if (summary) { summary.style.display = 'none'; summary.innerHTML = ''; }
+  const ta = document.getElementById('paste-report-textarea');
+  if (ta) ta.value = '';
+  pendingReportUpdates = null;
 }
 
 // ══════════════════════════════════════════════════════════════
