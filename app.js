@@ -22,6 +22,9 @@ let currentEditId = null;
 let currentEditSaleId = null;
 let currentFilteredDeliveries = []; // snapshot of what's on-screen, for bulk actions
 let pendingReportUpdates = null;    // staged result from parsePastedReport, awaiting confirm
+let deliveryUiStep = {};            // transient, not persisted: deliveryId -> 'main' | 'pick-sku'
+let lastDeliveryAction = null;      // snapshot for the undo toast
+let deliveryToastTimer = null;
 
 let invFilter   = 'all';
 let delFilter   = 'all';
@@ -538,35 +541,171 @@ function setInvFilter(f, el) {
   renderInventory();
 }
 
+// ── Big-button, thumb-friendly delivery actions (mobile-first) ──────
+// Replaces the old dropdown: one row of big buttons, no menu to open.
+// Tapping "Delivered" swaps in a second row (Spicy/Mild/Both) in the
+// same spot instead of a picker. Every action gets a 4-second undo.
+function bigDeliveryBtn(label, emoji, cls, onclick) {
+  return `<button class="${cls}" onclick="${onclick}"
+    style="flex:1;min-width:60px;min-height:46px;border:none;border-radius:8px;
+           font-size:13px;font-weight:600;display:flex;flex-direction:column;
+           align-items:center;justify-content:center;gap:2px;padding:6px 4px;cursor:pointer;">
+    <span style="font-size:17px;line-height:1;">${emoji}</span>${label}
+  </button>`;
+}
+
+// Shared renderer used by both the Inventory homepage and the
+// Deliveries tab — same delivery, same buttons, same state.
+function renderDeliveryActionButtons(d) {
+  if (!d) return '';
+  const step = deliveryUiStep[d.id] || 'main';
+
+  if (step === 'pick-sku') {
+    return `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        ${bigDeliveryBtn('Spicy', '🌶️', 'btn-del',    `handleBigDeliver('${d.id}','spicy')`)}
+        ${bigDeliveryBtn('Mild',  '🧡', 'btn-update', `handleBigDeliver('${d.id}','mild')`)}
+        ${bigDeliveryBtn('Both',  '✅', 'btn-queue',  `handleBigDeliver('${d.id}','both')`)}
+      </div>
+      <button onclick="cancelSkuPicker('${d.id}')" style="margin-top:4px;background:none;border:none;color:var(--ink3,#888);font-size:13px;padding:2px;cursor:pointer;">‹ Back</button>`;
+  }
+
+  if (d.status === 'delivered' || d.status === 'failed') {
+    const label = d.status === 'delivered'
+      ? `✅ Delivered${d.lastDeliverNote ? ' — '+d.lastDeliverNote : ''}`
+      : '❌ Failed';
+    return `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+        <span style="font-size:13px;">${label}</span>
+        <button class="btn-xs btn-queue" onclick="queueDelivery(${d.storeId})">Queue again</button>
+      </div>`;
+  }
+
+  const buttons = [];
+  if (d.status !== 'out') buttons.push(bigDeliveryBtn('Out', '🚚', 'btn-update', `handleBigOut('${d.id}')`));
+  buttons.push(bigDeliveryBtn('Delivered', '✅', 'btn-queue', `showSkuPicker('${d.id}')`));
+  buttons.push(bigDeliveryBtn('Failed', '❌', 'btn-del', `handleBigFailed('${d.id}')`));
+  return `<div style="display:flex;gap:6px;flex-wrap:wrap;">${buttons.join('')}</div>`;
+}
+
+function showSkuPicker(delivId) {
+  deliveryUiStep[delivId] = 'pick-sku';
+  renderInventory();
+  renderDeliveries();
+}
+function cancelSkuPicker(delivId) {
+  delete deliveryUiStep[delivId];
+  renderInventory();
+  renderDeliveries();
+}
+
+// Snapshot enough state to fully undo one quick action: the delivery's
+// own fields, plus the whole sales array (since "Delivered" can create
+// or overwrite a sale record).
+function captureDeliverySnapshot(delivId) {
+  const d = deliveries.find(x => String(x.id) === String(delivId));
+  if (!d) return null;
+  return {
+    delivId,
+    prevStatus: d.status,
+    prevSpicy: d.spicy,
+    prevMild: d.mild,
+    prevNote: d.lastDeliverNote,
+    prevSalesJson: localStorage.getItem('ac_sales') || '[]',
+  };
+}
+
+async function handleBigOut(delivId) {
+  const snap = captureDeliverySnapshot(delivId);
+  await quickUpdateStatus(delivId, 'out');
+  delete deliveryUiStep[delivId];
+  lastDeliveryAction = snap;
+  showDeliveryToast('Marked out for delivery');
+}
+
+async function handleBigFailed(delivId) {
+  const snap = captureDeliverySnapshot(delivId);
+  await quickUpdateStatus(delivId, 'failed');
+  delete deliveryUiStep[delivId];
+  lastDeliveryAction = snap;
+  showDeliveryToast('Marked failed');
+}
+
+async function handleBigDeliver(delivId, which) {
+  const snap = captureDeliverySnapshot(delivId);
+  const note = which === 'both' ? 'Both SKUs' : which === 'spicy' ? 'Spicy only' : 'Mild only';
+  const d = deliveries.find(x => String(x.id) === String(delivId));
+  if (d) d.lastDeliverNote = note;
+  const delivered = { spicy: which==='both'||which==='spicy', mild: which==='both'||which==='mild' };
+  await quickUpdateStatus(delivId, 'delivered', delivered);
+  delete deliveryUiStep[delivId];
+  lastDeliveryAction = snap;
+  showDeliveryToast(`Delivered — ${note}`);
+}
+
+// ── Undo toast ────────────────────────────────────────────────────
+function ensureDeliveryToast() {
+  if (document.getElementById('delivery-toast')) return;
+  const toast = document.createElement('div');
+  toast.id = 'delivery-toast';
+  toast.style.cssText = `
+    display:none; position:fixed; bottom:16px; left:50%; transform:translateX(-50%);
+    background:#1f2937; color:#fff; padding:10px 16px; border-radius:8px;
+    font-size:13px; z-index:10000; align-items:center; gap:14px; max-width:90vw;
+    box-shadow:0 4px 12px rgba(0,0,0,0.3);
+  `;
+  document.body.appendChild(toast);
+}
+
+function showDeliveryToast(message) {
+  ensureDeliveryToast();
+  const toast = document.getElementById('delivery-toast');
+  toast.style.display = 'flex';
+  toast.innerHTML = `<span>${message}</span><button onclick="undoLastDeliveryAction()" style="background:none;border:none;color:#93c5fd;font-weight:700;font-size:13px;cursor:pointer;">Undo</button>`;
+  clearTimeout(deliveryToastTimer);
+  deliveryToastTimer = setTimeout(() => {
+    toast.style.display = 'none';
+    lastDeliveryAction = null;
+  }, 4000);
+}
+
+async function undoLastDeliveryAction() {
+  if (!lastDeliveryAction) return;
+  const { delivId, prevStatus, prevSpicy, prevMild, prevNote, prevSalesJson } = lastDeliveryAction;
+  const d = deliveries.find(x => String(x.id) === String(delivId));
+  if (d) {
+    d.status = prevStatus;
+    d.spicy = prevSpicy;
+    d.mild = prevMild;
+    d.lastDeliverNote = prevNote;
+    d.updatedAt = new Date().toISOString();
+    await reconcileDeliveryStock(d, prevStatus === 'delivered');
+    saveDeliveriesLocal();
+    await sheetUpdateDelivery(d);
+  }
+  localStorage.setItem('ac_sales', prevSalesJson);
+
+  const toast = document.getElementById('delivery-toast');
+  if (toast) toast.style.display = 'none';
+  clearTimeout(deliveryToastTimer);
+  lastDeliveryAction = null;
+
+  renderInventory();
+  renderDeliveries();
+  renderSales();
+}
+
 // Inline delivery controls shown in each Inventory row's action cell.
 // Mirrors the Deliveries-tab quick actions so you never have to leave
 // the homepage to move a store's delivery along.
 function renderInvDeliveryControls(storeId) {
   const d = getLatestDeliveryForStore(storeId);
-
-  if (!d || d.status === 'delivered' || d.status === 'failed') {
-    const label = d?.status === 'delivered' ? '✅ Delivered — Queue again'
-                : d?.status === 'failed'    ? '❌ Failed — Requeue'
-                : '+ Queue';
-    return `<button class="btn-xs btn-queue" onclick="queueDelivery(${storeId})">${label}</button>`;
+  if (!d) {
+    return `<button class="btn-xs btn-queue" onclick="queueDelivery(${storeId})">+ Queue</button>`;
   }
-
-  const statusTxt = d.status === 'out' ? '🚚 Out' : '⏳ Pending';
-  return `
-    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-      <span class="badge" style="font-size:11px;">${statusTxt}</span>
-      ${d.status!=='out' ? `<button class="btn-xs btn-update" onclick="quickUpdateStatus('${d.id}','out')" title="Mark out for delivery">🚚</button>` : ''}
-      <select class="btn-xs" style="padding:2px 4px;"
-        onchange="if(this.value){handleQuickDeliver('${d.id}', this.value); this.selectedIndex=0;}">
-        <option value="">✅ Delivered…</option>
-        <option value="both">Both SKUs</option>
-        <option value="spicy">Spicy only</option>
-        <option value="mild">Mild only</option>
-      </select>
-      <button class="btn-xs btn-del" onclick="quickUpdateStatus('${d.id}','failed')" title="Mark failed">❌</button>
-      <button class="btn-xs btn-update" onclick="openStatusModal('${d.id}')" title="Edit driver / notes / quantities">✎</button>
-    </div>`;
+  return renderDeliveryActionButtons(d);
 }
+
 
 function renderInventory() {
   const ids = Object.keys(stores).map(Number).sort((a,b)=>a-b);
@@ -798,19 +937,6 @@ function renderDeliveries() {
     const cases = clamp(d.spicy)+clamp(d.mild);
     const rev   = cases * PRICING.casePrice;
 
-    // Quick-deliver control: pick which SKU(s) actually went out.
-    // This zeroes whichever one wasn't delivered rather than always
-    // recording both, so partial deliveries (e.g. only had spicy on
-    // the truck) get logged correctly without opening the edit modal.
-    const quickDeliverHtml = d.status!=='delivered' ? `
-      <select class="btn-xs" style="padding:2px 4px;"
-        onchange="if(this.value){handleQuickDeliver('${d.id}', this.value); this.selectedIndex=0;}">
-        <option value="">✅ Delivered…</option>
-        <option value="both">Both SKUs</option>
-        <option value="spicy">Spicy only</option>
-        <option value="mild">Mild only</option>
-      </select>` : '';
-
     return `<tr>
       <td><strong>#${d.storeId}</strong></td>
       <td class="addr-cell">${d.addr}<br><small style="color:var(--ink3)">${d.city}, VA ${d.zip}</small></td>
@@ -821,13 +947,13 @@ function renderDeliveries() {
       <td>${d.driver || '<span style="color:var(--ink4)">Unassigned</span>'}</td>
       <td>${fmtDate(d.date)}</td>
       <td>${statusLabel[d.status] || d.status}</td>
-      <td class="action-cell" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-        ${gpsLinkHtml(d.addr, d.city, d.zip)}
-        ${d.status!=='out'    ? `<button class="btn-xs btn-update" onclick="quickUpdateStatus('${d.id}','out')" title="Mark out for delivery">🚚</button>` : ''}
-        ${quickDeliverHtml}
-        ${d.status!=='failed' ? `<button class="btn-xs btn-del" onclick="quickUpdateStatus('${d.id}','failed')" title="Mark failed">❌</button>` : ''}
-        <button class="btn-xs btn-update" onclick="openStatusModal('${d.id}')" title="Edit driver / notes / quantities">✎</button>
-        <button class="btn-xs btn-del" onclick="deleteDelivery('${d.id}')" title="Delete">×</button>
+      <td class="action-cell" style="display:flex;flex-direction:column;gap:6px;min-width:180px;">
+        ${renderDeliveryActionButtons(d)}
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          ${gpsLinkHtml(d.addr, d.city, d.zip)}
+          <button class="btn-xs btn-update" onclick="openStatusModal('${d.id}')" title="Edit driver / notes / quantities">✎</button>
+          <button class="btn-xs btn-del" onclick="deleteDelivery('${d.id}')" title="Delete">×</button>
+        </div>
       </td>
     </tr>`;
   }).join('');
@@ -868,15 +994,9 @@ async function quickUpdateStatus(delivId, status, delivered = null) {
   renderSales();
 }
 
-// Wired to the "✅ Delivered…" dropdown in each row (Inventory + Deliveries).
-function handleQuickDeliver(delivId, which) {
-  const delivered = { spicy: which==='both'||which==='spicy', mild: which==='both'||which==='mild' };
-  quickUpdateStatus(delivId, 'delivered', delivered);
-}
-
 // ── Bulk update everything currently visible in the Deliveries tab ──
 // Note: the bulk "Delivered" action records BOTH SKUs for every row —
-// for partial deliveries, use the per-row dropdown instead.
+// for partial deliveries, use the per-row big buttons instead.
 async function bulkUpdateFiltered(status) {
   const list = currentFilteredDeliveries.filter(d=>d.status!==status);
   if (!list.length) { alert('Nothing to update in the current view.'); return; }
