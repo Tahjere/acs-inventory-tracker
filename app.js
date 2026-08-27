@@ -128,11 +128,32 @@ function fmtCur(n)   { return '$' + (n||0).toFixed(2); }
 function isThisWeek(s)  { return new Date(s) >= new Date(Date.now()-7*86400000); }
 function isThisMonth(s) { const d=new Date(s),n=new Date(); return d.getMonth()===n.getMonth()&&d.getFullYear()===n.getFullYear(); }
 
+// Anything below this quantity on a SKU counts as low stock.
+const LOW_STOCK_THRESHOLD = 5;
+
 function stockStatus(s, m) {
   s = clamp(s); m = clamp(m);
   if (s === 0 && m === 0) return 'urgent';
-  if (s <= 3 || m <= 3)   return 'low';
+  if (s < LOW_STOCK_THRESHOLD || m < LOW_STOCK_THRESHOLD) return 'low';
   return 'ok';
+}
+
+// Fine-grained status distinguishing which SKU(s) are out or low, for
+// badge labels. "Out" (0 on hand) takes priority over "low" per SKU.
+function stockStatusDetail(s, m) {
+  s = clamp(s); m = clamp(m);
+  const spicyOut = s === 0;
+  const mildOut  = m === 0;
+  const spicyLow = s > 0 && s < LOW_STOCK_THRESHOLD;
+  const mildLow  = m > 0 && m < LOW_STOCK_THRESHOLD;
+
+  if (spicyOut && mildOut) return { code: 'both-out',  label: 'Both out' };
+  if (spicyOut)            return { code: 'spicy-out', label: 'Spicy out' };
+  if (mildOut)             return { code: 'mild-out',  label: 'Mild out' };
+  if (spicyLow && mildLow) return { code: 'low-both',  label: 'Low stock (both)' };
+  if (spicyLow)            return { code: 'low-spicy', label: 'Low stock (spicy)' };
+  if (mildLow)             return { code: 'low-mild',  label: 'Low stock (mild)' };
+  return { code: 'ok', label: 'OK' };
 }
 
 function bigDrop(id) {
@@ -187,8 +208,17 @@ async function reconcileDeliveryStock(d, isNowDelivered) {
   const deltaMild   = targetMild  - (d.appliedMild  || 0);
 
   if (deltaSpicy !== 0 || deltaMild !== 0) {
-    store.S_jun = clamp(clamp(store.S_jun) + deltaSpicy);
-    store.M_jun = clamp(clamp(store.M_jun) + deltaMild);
+    // "Versus/last" only moves for a SKU that actually changed —
+    // it captures the value right before this change, not a fixed
+    // reporting-period snapshot.
+    if (deltaSpicy !== 0) {
+      store.S_may = clamp(store.S_jun);
+      store.S_jun = clamp(clamp(store.S_jun) + deltaSpicy);
+    }
+    if (deltaMild !== 0) {
+      store.M_may = clamp(store.M_jun);
+      store.M_jun = clamp(clamp(store.M_jun) + deltaMild);
+    }
 
     if (deltaSpicy > 0 || deltaMild > 0) {
       store.lastRestockedAt = new Date().toISOString();
@@ -397,13 +427,24 @@ async function applyPastedReport() {
 
     for (const [storeNum, v] of entries) {
       const prev = stores[storeNum] || {};
+      const prevSpicy = clamp(prev.S_jun);
+      const prevMild  = clamp(prev.M_jun);
+      const newSpicy  = v.spicy !== null ? v.spicy : prevSpicy;
+      const newMild   = v.mild  !== null ? v.mild  : prevMild;
+
+      // Only move "versus/last" for a SKU whose count actually changed
+      // from what's currently on file — an unchanged count keeps
+      // whatever versus/last value it already had.
+      const spicyChanged = newSpicy !== prevSpicy;
+      const mildChanged  = newMild  !== prevMild;
+
       stores[storeNum] = {
         ...prev,
         addr: v.addr, city: v.city, zip: v.zip,
-        S_may: prev.S_jun !== undefined ? clamp(prev.S_jun) : 0,
-        M_may: prev.M_jun !== undefined ? clamp(prev.M_jun) : 0,
-        S_jun: v.spicy !== null ? v.spicy : clamp(prev.S_jun),
-        M_jun: v.mild  !== null ? v.mild  : clamp(prev.M_jun),
+        S_may: spicyChanged ? prevSpicy : (prev.S_may !== undefined ? prev.S_may : 0),
+        M_may: mildChanged  ? prevMild  : (prev.M_may !== undefined ? prev.M_may : 0),
+        S_jun: newSpicy,
+        M_jun: newMild,
       };
     }
 
@@ -605,14 +646,14 @@ function renderInventory() {
     const dS  = js-ms, dM = jm-mm;
     const done = !storeNeedsAttention(id);
 
-    const badge = st==='urgent'
-      ? `<span class="badge badge-urgent">Both out</span>`
-      : st==='low'
-      ? `<span class="badge badge-low">Low stock</span>`
-      : `<span class="badge badge-ok">OK</span>`;
+    const detail = stockStatusDetail(js, jm);
+    const badgeClass = detail.code === 'ok' ? 'badge-ok'
+                      : detail.code.includes('out') ? 'badge-urgent'
+                      : 'badge-low';
+    const badge = `<span class="badge ${badgeClass}">${detail.label}</span>`;
 
     function skuEl(v) {
-      const c = v===0 ? 'sku-zero' : v<=3 ? 'sku-low' : 'sku-ok';
+      const c = v===0 ? 'sku-zero' : v<LOW_STOCK_THRESHOLD ? 'sku-low' : 'sku-ok';
       return `<span class="sku ${c}">${v}</span>`;
     }
     function dEl(v) {
@@ -1292,7 +1333,7 @@ function exportDispatch() {
   txt += `${'='.repeat(52)}\n\n`;
   txt += `🔴 URGENT — BOTH SKUs AT ZERO (${urgent.length} stores)\n${'—'.repeat(40)}\n`;
   urgent.forEach(id=>{const d=stores[id];txt+=`#${id} | ${d.addr}, ${d.city}, VA ${d.zip}\n  📍 ${mapsUrl(id)}\n`;});
-  txt += `\n🟡 LOW STOCK — ONE SKU ≤3 (${low.length} stores)\n${'—'.repeat(40)}\n`;
+  txt += `\n🟡 LOW STOCK — ONE SKU <${LOW_STOCK_THRESHOLD} (${low.length} stores)\n${'—'.repeat(40)}\n`;
   low.forEach(id=>{const d=stores[id];txt+=`#${id} | ${d.addr}, ${d.city}, VA ${d.zip}\n  📍 ${mapsUrl(id)}\n  Spicy:${clamp(d.S_jun)} Mild:${clamp(d.M_jun)}\n`;});
   txt += `\nTotal needing delivery: ${urgent.length+low.length}`;
   document.getElementById('dispatch-text').textContent = txt;
