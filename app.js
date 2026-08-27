@@ -407,26 +407,37 @@ async function applyPastedReport() {
       };
     }
 
-    // Persist all touched stores as overrides + best-effort Sheet push.
+    // Persist locally FIRST — instant, always succeeds, and is what
+    // actually drives the Inventory tab. The Sheet sync below is
+    // best-effort and must not block this.
     const saved = JSON.parse(localStorage.getItem('ac_stores')||'{}');
     for (const [storeNum] of entries) {
       saved[storeNum] = stores[storeNum];
     }
     localStorage.setItem('ac_stores', JSON.stringify(saved));
 
-    if (typeof sheetAddStore === 'function') {
-      for (const [storeNum] of entries) {
-        try { await sheetAddStore({ storeId: storeNum, ...stores[storeNum] }); } catch(e) { console.warn('sheetAddStore failed for store', storeNum, e); }
-      }
-    }
-
     const count = entries.length;
     pendingReportUpdates = null;
     renderInventory();
 
-    if (statusEl) statusEl.textContent = `✅ Applied ${count} stores to Inventory. Check the Inventory tab — you can close this window now.`;
+    if (statusEl) statusEl.textContent = `✅ Applied ${count} stores to Inventory. Syncing to the Sheet in the background — you can close this window now.`;
     const summaryEl = document.getElementById('pr-summary');
     if (summaryEl) summaryEl.style.display = 'none';
+    if (btn) { btn.textContent = 'Applied'; }
+
+    // Push to the Sheet in the background, in parallel, with a timeout
+    // per request — a slow or hung call here can no longer freeze the
+    // UI or block the other 68 stores from applying.
+    if (typeof sheetAddStore === 'function') {
+      const withTimeout = (p, ms) => Promise.race([
+        p,
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timed out')), ms))
+      ]);
+      Promise.all(entries.map(([storeNum]) =>
+        withTimeout(sheetAddStore({ storeId: storeNum, ...stores[storeNum] }), 8000)
+          .catch(e => console.warn('Background Sheet sync failed for store', storeNum, e))
+      )).then(() => console.log('Background Sheet sync finished for pasted report.'));
+    }
   } catch (err) {
     console.error('applyPastedReport failed:', err);
     if (statusEl) statusEl.textContent = `⚠️ Apply failed: ${err.message}. Open the browser console (F12 → Console tab) and share the red error text so I can fix it.`;
