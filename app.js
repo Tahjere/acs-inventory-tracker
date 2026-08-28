@@ -770,13 +770,22 @@ function normalizeCity(c) {
   return String(c || '').trim().toLowerCase();
 }
 
+// Converts any casing ("VIRGINIA BEACH", "virginia beach") to a clean
+// "Virginia Beach" for display — the underlying match is still done on
+// the lowercase normalized key, so this is purely cosmetic.
+function titleCase(str) {
+  return String(str || '')
+    .toLowerCase()
+    .replace(/\b\w/g, c => c.toUpperCase());
+}
+
 function populateCityDropdown() {
   const sel = document.getElementById('inv-city-select');
   if (!sel) return;
-  const seen = new Map(); // normalized city -> a display label (first one seen)
+  const seen = new Map(); // normalized city -> clean display label
   Object.values(stores).forEach(s => {
     const norm = normalizeCity(s.city);
-    if (norm && !seen.has(norm)) seen.set(norm, s.city);
+    if (norm && !seen.has(norm)) seen.set(norm, titleCase(s.city));
   });
   const entries = Array.from(seen.entries()).sort((a, b) => a[1].localeCompare(b[1]));
   sel.innerHTML = `<option value="all">All cities (${entries.length})</option>` +
