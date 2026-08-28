@@ -997,9 +997,8 @@ function renderInventory() {
 // the single "Queue" button and the bulk "New Delivery Run" so they
 // never disagree with each other.
 function computeRestockQty(s, m) {
-  let spicyQty = s === 0 ? 2 : s < LOW_STOCK_THRESHOLD ? 1 : 0;
-  let mildQty  = m === 0 ? 2 : m < LOW_STOCK_THRESHOLD ? 1 : 0;
-  if (spicyQty === 0 && mildQty === 0) { spicyQty = 1; mildQty = 1; }
+  const spicyQty = s < LOW_STOCK_THRESHOLD ? 1 : 0;
+  const mildQty  = m < LOW_STOCK_THRESHOLD ? 1 : 0;
   return { spicyQty, mildQty };
 }
 
