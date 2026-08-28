@@ -33,6 +33,10 @@ let delFilter   = 'all';
 let salesFilter = 'all';
 
 // ── Boot ─────────────────────────────────────────────────────
+let autoSyncTimer = null;
+let autoSyncInFlight = false;
+const AUTO_SYNC_INTERVAL_MS = 20000; // how often devices re-check the Sheet
+
 async function boot() {
   loadStoresLocal();
   loadDeliveriesLocal();   // show cached data instantly
@@ -50,6 +54,8 @@ async function boot() {
     if (dot && dot.classList.contains('ok')) {
       await refreshFromSheet();
     }
+    startAutoSync();
+    if (typeof initSupabaseRealtime === 'function') initSupabaseRealtime();
   } else {
     setSyncStatus('err', 'Sheet not configured');
     const banner = document.getElementById('config-banner');
@@ -57,15 +63,44 @@ async function boot() {
   }
 }
 
+// Keeps every open device converging on the same Sheet data without
+// needing a manual reload. Not instant push-based real-time — there's
+// up to AUTO_SYNC_INTERVAL_MS of lag — but for a shared inventory list
+// that's normally indistinguishable from it in practice. Only actually
+// hits the network while the tab is in the foreground, and does one
+// extra sync immediately whenever you switch back to the tab so you're
+// never stuck waiting out the rest of the interval.
+async function runAutoSync() {
+  if (autoSyncInFlight || !SHEET_CONFIGURED) return;
+  autoSyncInFlight = true;
+  setSyncStatus('busy', 'Syncing…');
+  try {
+    await refreshFromSheet();
+    setSyncStatus('ok', 'Synced');
+  } catch (e) {
+    console.warn('Auto-sync failed:', e);
+    setSyncStatus('err', 'Sync failed');
+  } finally {
+    autoSyncInFlight = false;
+  }
+}
+
+function startAutoSync() {
+  if (autoSyncTimer) return;
+  autoSyncTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') runAutoSync();
+  }, AUTO_SYNC_INTERVAL_MS);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') runAutoSync();
+  });
+}
+
 // ── Pull fresh data from Sheet ────────────────────────────────
 async function refreshFromSheet() {
   const [sheetDels, sheetSales, sheetStores] = await Promise.all([
     sheetGetDeliveries(),
     sheetGetSales(),
-    (async () => { try {
-      const r = await fetch(SHEET_URL + '?action=getStores');
-      const j = await r.json(); return j.data || [];
-    } catch(e) { return []; }})()
+    supabaseGetStores(),
   ]);
 
   if (sheetDels !== null) {
@@ -905,6 +940,10 @@ function renderInventory() {
     if (sortBy==='mld')   return clamp(stores[a].M_jun)-clamp(stores[b].M_jun);
     if (sortBy==='route') {
       const za = stores[a].zip || '', zb = stores[b].zip || '';
+      // A blank zip (missing/bad data) shouldn't cluster at the top just
+      // because an empty string sorts before real zip codes.
+      if (!za && zb) return 1;
+      if (za && !zb) return -1;
       if (za !== zb) return za.localeCompare(zb);
       return (stores[a].addr||'').localeCompare(stores[b].addr||'');
     }
