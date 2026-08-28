@@ -27,6 +27,8 @@ let lastDeliveryAction = null;      // snapshot for the undo toast
 let deliveryToastTimer = null;
 
 let invFilter   = 'all';
+let cityFilter  = 'all';
+let currentFilteredStoreIds = []; // snapshot of what's visible in Inventory, for the route button
 let delFilter   = 'all';
 let salesFilter = 'all';
 
@@ -711,6 +713,63 @@ function renderInvDeliveryControls(storeId) {
 }
 
 
+// ── City filter + route helpers ──────────────────────────────────
+// Injects a city dropdown + "Route for this view" button above the
+// Inventory table once. Rebuilds the dropdown's options every render
+// so newly-added stores (e.g. from a pasted report) show up.
+function ensureCityFilterBar() {
+  if (document.getElementById('inv-city-bar')) return;
+  const stats = document.getElementById('inv-stats');
+  if (!stats) return;
+  const bar = document.createElement('div');
+  bar.id = 'inv-city-bar';
+  bar.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0;';
+  bar.innerHTML = `
+    <label style="font-size:12px;color:var(--ink3,#777);">City:</label>
+    <select id="inv-city-select" onchange="setCityFilter(this.value)"></select>
+    <button class="btn-xs btn-queue" onclick="openRouteForCityView()">🗺️ Route for this view</button>
+  `;
+  stats.insertAdjacentElement('afterend', bar);
+}
+
+function populateCityDropdown() {
+  const sel = document.getElementById('inv-city-select');
+  if (!sel) return;
+  const cities = Array.from(new Set(Object.values(stores).map(s => s.city).filter(Boolean))).sort();
+  sel.innerHTML = `<option value="all">All cities (${cities.length})</option>` +
+    cities.map(c => `<option value="${c}">${c}</option>`).join('');
+  sel.value = cityFilter;
+}
+
+function setCityFilter(city) {
+  cityFilter = city;
+  renderInventory();
+}
+
+// Adds "Best route (by zip)" to the existing sort dropdown if it's
+// not already there — grouping by zip is a free proxy for "these are
+// probably near each other" since there's no real lat/long on file.
+function ensureInvRouteSortOption() {
+  const sel = document.getElementById('inv-sort');
+  if (!sel || sel.querySelector('option[value="route"]')) return;
+  sel.insertAdjacentHTML('beforeend', `<option value="route">Best route (by zip)</option>`);
+}
+
+// Hands the currently-visible stores (respecting city/status/search
+// filters) to Google Maps as a multi-stop trip. This is the part that
+// gives an actually accurate route — Google has real road data, our
+// zip-based sort is just a starting guess at the order.
+function openRouteForCityView() {
+  const ids = currentFilteredStoreIds;
+  if (!ids.length) { alert('No stores in the current view to route.'); return; }
+  if (ids.length > 23) alert('Route link is capped at 23 stops — using the first 23 in view.');
+  const addrs = ids.map(id => {
+    const d = stores[id];
+    return `${d.addr}, ${d.city}, VA ${d.zip}`;
+  });
+  window.open(buildRouteUrl(addrs), '_blank');
+}
+
 function renderInventory() {
   const ids = Object.keys(stores).map(Number).sort((a,b)=>a-b);
   const search  = (document.getElementById('search-input')?.value || '').toLowerCase();
@@ -734,6 +793,10 @@ function renderInventory() {
     <div class="stat"><div class="stat-label">🧡 Mild on shelf</div><div class="stat-val">${totalM}</div></div>
   `;
 
+  ensureCityFilterBar();
+  populateCityDropdown();
+  ensureInvRouteSortOption();
+
   // Filter
   let filtered = ids.filter(id => {
     const d = stores[id];
@@ -742,6 +805,7 @@ function renderInventory() {
     if (invFilter==='urgent'  && st!=='urgent') return false;
     if (invFilter==='low'     && st!=='low')    return false;
     if (invFilter==='dropped' && !bigDrop(id))  return false;
+    if (cityFilter !== 'all' && d.city !== cityFilter) return false;
     if (search) {
       const hay = `${id} ${d.city} ${d.addr}`.toLowerCase();
       if (!hay.includes(search)) return false;
@@ -755,6 +819,11 @@ function renderInventory() {
     if (sortBy==='city')  return stores[a].city.localeCompare(stores[b].city);
     if (sortBy==='spc')   return clamp(stores[a].S_jun)-clamp(stores[b].S_jun);
     if (sortBy==='mld')   return clamp(stores[a].M_jun)-clamp(stores[b].M_jun);
+    if (sortBy==='route') {
+      const za = stores[a].zip || '', zb = stores[b].zip || '';
+      if (za !== zb) return za.localeCompare(zb);
+      return (stores[a].addr||'').localeCompare(stores[b].addr||'');
+    }
     const sa=stockStatus(clamp(stores[a].S_jun),clamp(stores[a].M_jun));
     const sb=stockStatus(clamp(stores[b].S_jun),clamp(stores[b].M_jun));
     if (sa!==sb) return statusOrder[sa]-statusOrder[sb];
@@ -771,6 +840,8 @@ function renderInventory() {
     const nb = storeNeedsAttention(b) ? 0 : 1;
     return na - nb;
   });
+
+  currentFilteredStoreIds = filtered; // for the "Route for this view" button
 
   document.getElementById('inv-count').textContent =
     `Showing ${filtered.length} of ${ids.length} stores`;
