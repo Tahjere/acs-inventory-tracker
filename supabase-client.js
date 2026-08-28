@@ -1,5 +1,5 @@
 // ============================================================
-// AUNT CAROL'S SAUCE — SUPABASE DATA LAYER  v1
+// AUNT CAROL'S SAUCE — SUPABASE DATA LAYER  v2
 // Replaces the Google Sheets Apps Script backend as the app's live,
 // real-time data source. Still writes to the old Sheet too (best
 // effort, one-way, non-blocking) so it keeps working as a human-
@@ -7,19 +7,12 @@
 // which is what avoids the sync-conflict/stale-overwrite bugs from
 // earlier in this build.
 //
-// SETUP — three things still needed:
-// 1. Paste your Supabase Project URL below (SUPABASE_URL).
-// 2. Add these to index.html, BEFORE your app-logic.js <script> tag:
-//      <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-//      <script src="supabase-client.js"></script>
-// 3. Two small edits still needed in app-logic.js — see the note at
-//    the very bottom of this file.
-//
-// KNOWN GUESS, FLAGGED: mirrorToSheet() below is a best-guess request
-// shape for your existing Apps Script — I've never seen that backend
-// code (only what calls it from app-logic.js), so this may not match
-// its actual expected format. If the mirror doesn't work, share that
-// script with me and I'll match it exactly instead of guessing.
+// v2 fix: the client instance is now named `sb`, not `supabase` — the
+// CDN library itself declares a global `var supabase`, and you can't
+// also declare `const supabase` in the same scope (that's the
+// "Identifier 'supabase' has already been declared" SyntaxError).
+// v2 fix: setSyncStatus() now targets the real element id `sync-lbl`
+// (was incorrectly `sync-label`, which silently did nothing).
 // ============================================================
 
 const SUPABASE_URL = 'https://fsyypypudlaaretqkzwj.supabase.co';
@@ -28,13 +21,13 @@ const SUPABASE_KEY = 'sb_publishable_PjS3uIMy8vKwRyGnwcKJuQ_jLceCG03';
 const SHEET_CONFIGURED = true; // gates sync-dot/boot behavior in app-logic.js
 const SHEET_URL = '';          // paste your EXISTING Apps Script URL here to keep the write-only backup mirror; leave blank to skip it entirely
 
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ── Connection test / sync indicator ──────────────────────────
 async function testSheetConnection() {
   setSyncStatus('busy', 'Connecting…');
   try {
-    const { error } = await supabase.from('stores').select('store_id').limit(1);
+    const { error } = await sb.from('stores').select('store_id').limit(1);
     if (error) throw error;
     setSyncStatus('ok', 'Connected');
   } catch (e) {
@@ -45,7 +38,7 @@ async function testSheetConnection() {
 
 function setSyncStatus(state, label) {
   const dot = document.getElementById('sync-dot');
-  const text = document.getElementById('sync-label');
+  const text = document.getElementById('sync-lbl');
   if (dot) dot.className = 'sync-dot ' + state; // ok | busy | err
   if (text) text.textContent = label || '';
 }
@@ -117,12 +110,9 @@ function rowToStore(r) {
 }
 
 // ── Stores ──────────────────────────────────────────────────
-// app-logic.js's refreshFromSheet() currently fetches stores via a raw
-// fetch() to SHEET_URL — swap that one spot to call this instead (see
-// the note at the bottom of this file).
 async function supabaseGetStores() {
   try {
-    const { data, error } = await supabase.from('stores').select('*');
+    const { data, error } = await sb.from('stores').select('*');
     if (error) throw error;
     return (data || []).map(rowToStore);
   } catch (e) {
@@ -131,14 +121,11 @@ async function supabaseGetStores() {
   }
 }
 
-// Upsert — used both for creating a new store and for pushing updated
-// stock counts (matches how app-logic.js already treats sheetAddStore
-// as an upsert).
 async function sheetAddStore(storeObj) {
   const { storeId, ...rest } = storeObj;
   const row = storeToRow(storeId, rest);
   try {
-    const { error } = await supabase.from('stores').upsert(row, { onConflict: 'store_id' });
+    const { error } = await sb.from('stores').upsert(row, { onConflict: 'store_id' });
     if (error) throw error;
   } catch (e) {
     console.error('sheetAddStore (Supabase) failed:', e);
@@ -149,7 +136,7 @@ async function sheetAddStore(storeObj) {
 // ── Deliveries ──────────────────────────────────────────────
 async function sheetGetDeliveries() {
   try {
-    const { data, error } = await supabase.from('deliveries').select('*');
+    const { data, error } = await sb.from('deliveries').select('*');
     if (error) throw error;
     return (data || []).map(rowToDelivery);
   } catch (e) {
@@ -160,7 +147,7 @@ async function sheetGetDeliveries() {
 
 async function sheetAddDelivery(rec) {
   try {
-    const { error } = await supabase.from('deliveries').insert(deliveryToRow(rec));
+    const { error } = await sb.from('deliveries').insert(deliveryToRow(rec));
     if (error) throw error;
   } catch (e) {
     console.error('sheetAddDelivery (Supabase) failed:', e);
@@ -170,7 +157,7 @@ async function sheetAddDelivery(rec) {
 
 async function sheetUpdateDelivery(d) {
   try {
-    const { error } = await supabase.from('deliveries').update(deliveryToRow(d)).eq('id', d.id);
+    const { error } = await sb.from('deliveries').update(deliveryToRow(d)).eq('id', d.id);
     if (error) throw error;
   } catch (e) {
     console.error('sheetUpdateDelivery (Supabase) failed:', e);
@@ -180,7 +167,7 @@ async function sheetUpdateDelivery(d) {
 
 async function sheetDeleteDelivery(delivId) {
   try {
-    const { error } = await supabase.from('deliveries').delete().eq('id', delivId);
+    const { error } = await sb.from('deliveries').delete().eq('id', delivId);
     if (error) throw error;
   } catch (e) {
     console.error('sheetDeleteDelivery (Supabase) failed:', e);
@@ -191,7 +178,7 @@ async function sheetDeleteDelivery(delivId) {
 // ── Sales ───────────────────────────────────────────────────
 async function sheetGetSales() {
   try {
-    const { data, error } = await supabase.from('sales').select('*');
+    const { data, error } = await sb.from('sales').select('*');
     if (error) throw error;
     return (data || []).map(rowToSale);
   } catch (e) {
@@ -202,7 +189,7 @@ async function sheetGetSales() {
 
 async function sheetAddSale(sale) {
   try {
-    const { error } = await supabase.from('sales').upsert(saleToRow(sale), { onConflict: 'delivery_id' });
+    const { error } = await sb.from('sales').upsert(saleToRow(sale), { onConflict: 'delivery_id' });
     if (error) throw error;
   } catch (e) {
     console.error('sheetAddSale (Supabase) failed:', e);
@@ -211,11 +198,8 @@ async function sheetAddSale(sale) {
 }
 
 // ── Realtime: push updates to every open browser ────────────
-// Any insert/update/delete on these tables triggers a full re-pull —
-// simple and robust for a dataset this size, and avoids subtle merge
-// bugs from trying to patch in just the one changed row.
 function initSupabaseRealtime() {
-  supabase
+  sb
     .channel('aunt-carols-live')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'stores' },     () => refreshFromSheet())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, () => refreshFromSheet())
@@ -224,20 +208,11 @@ function initSupabaseRealtime() {
 }
 
 // ============================================================
-// TWO SMALL CHANGES STILL NEEDED IN app-logic.js:
+// TWO SMALL CHANGES STILL NEEDED IN app.js (if not already done):
 //
-// 1. Inside refreshFromSheet(), replace the raw fetch for stores:
-//      (async () => { try {
-//        const r = await fetch(SHEET_URL + '?action=getStores');
-//        const j = await r.json(); return j.data || [];
-//      } catch(e) { return []; }})()
-//    with just:
+// 1. Inside refreshFromSheet(), replace the raw fetch for stores with:
 //      supabaseGetStores()
 //
 // 2. Inside boot(), right after startAutoSync(), add:
 //      initSupabaseRealtime();
-//    This is what makes updates push instantly instead of waiting for
-//    the 20-second poll. You can leave the polling in as a fallback,
-//    or remove it later once realtime is confirmed working — either
-//    is fine, they don't conflict.
 // ============================================================
