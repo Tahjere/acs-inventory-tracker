@@ -725,6 +725,9 @@ function ensureCityFilterBar() {
   bar.id = 'inv-city-bar';
   bar.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0;';
   bar.innerHTML = `
+    <button class="pill" onclick="setInvFilter('spicy-needs', this)">🌶️ Low spicy</button>
+    <button class="pill" onclick="setInvFilter('mild-needs', this)">🧡 Low mild</button>
+    <span style="width:1px;height:20px;background:var(--border,#e5e2dc);"></span>
     <label style="font-size:12px;color:var(--ink3,#777);">City:</label>
     <select id="inv-city-select" onchange="setCityFilter(this.value)"></select>
     <button class="btn-xs btn-queue" onclick="openRouteForCityView()">🗺️ Route for this view</button>
@@ -747,12 +750,14 @@ function setCityFilter(city) {
 }
 
 // Adds "Best route (by zip)" to the existing sort dropdown if it's
-// not already there — grouping by zip is a free proxy for "these are
-// probably near each other" since there's no real lat/long on file.
+// not already there, and makes it the default the first time this
+// runs — grouping by zip is a free proxy for "these are probably near
+// each other" since there's no real lat/long on file.
 function ensureInvRouteSortOption() {
   const sel = document.getElementById('inv-sort');
   if (!sel || sel.querySelector('option[value="route"]')) return;
   sel.insertAdjacentHTML('beforeend', `<option value="route">Best route (by zip)</option>`);
+  sel.value = 'route';
 }
 
 // Hands the currently-visible stores (respecting city/status/search
@@ -805,6 +810,8 @@ function renderInventory() {
     if (invFilter==='urgent'  && st!=='urgent') return false;
     if (invFilter==='low'     && st!=='low')    return false;
     if (invFilter==='dropped' && !bigDrop(id))  return false;
+    if (invFilter==='spicy-needs' && s >= LOW_STOCK_THRESHOLD) return false;
+    if (invFilter==='mild-needs'  && m >= LOW_STOCK_THRESHOLD) return false;
     if (cityFilter !== 'all' && d.city !== cityFilter) return false;
     if (search) {
       const hay = `${id} ${d.city} ${d.addr}`.toLowerCase();
