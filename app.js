@@ -1,18 +1,16 @@
 // ============================================================
-// AUNT CAROL'S SAUCE — APP LOGIC  v8
-// Storage: Google Sheets (primary) + localStorage (offline cache)
-// v8 changes (fixes for the paste-report feature added in v7):
-//  - Parser rewritten to scan for store-number lines as anchors and
-//    validate each candidate 8-line record (state looks like a state
-//    code, zip looks like a zip, product mentions SPC/MLD) before
-//    accepting it. Stray header rows, page numbers, or footer text
-//    anywhere in the paste now get skipped instead of shifting every
-//    record after them out of alignment.
-//  - The paste UI is now a fully self-contained popup with its own
-//    unique element IDs (pr-status/pr-summary/pr-textarea/etc.)
-//    instead of reusing parse-status/parse-summary, which may already
-//    exist in your real HTML for a separate file-upload feature —
-//    reusing those risked writing into the wrong (invisible) element.
+// AUNT CAROL'S SAUCE — APP LOGIC  v9  (this file is your app.js)
+// Storage: Supabase (primary, realtime) + Google Sheets (write-only
+// backup mirror, via supabase-client.js) + localStorage (offline cache)
+//
+// v9 change: now that the real index.html is known, the paste-report
+// parser (rewritten in v8 to tolerate messy pasted text) is wired into
+// the ACTUAL "Parse & update inventory" button and its real elements
+// (#paste-input, #parse-status, #parse-summary) inside your existing
+// upload modal — not a separate popup. An earlier version of this file
+// built its own floating popup because the real HTML wasn't available
+// yet; that's been removed. parser.js's handleReportUpload() (.docx
+// upload tab) is untouched — that file has never been shared with me.
 // ============================================================
 
 // ── State ───────────────────────────────────────────────────
@@ -429,12 +427,15 @@ function parsePastedReport(rawText) {
 
 // Stage parsed results and show a review summary before touching any
 // data. Nothing is applied until applyPastedReport() is called.
+// Wired to the real modal's "Parse & update inventory" button via
+// handlePasteSubmit() below — targets the actual #parse-status /
+// #parse-summary elements already in the page, not a separate popup.
 function previewPastedReport(rawText) {
   let parsed;
   try {
     parsed = parsePastedReport(rawText);
   } catch (e) {
-    const statusEl = document.getElementById('pr-status');
+    const statusEl = document.getElementById('parse-status');
     if (statusEl) statusEl.textContent = `Parse error: ${e.message}`;
     return;
   }
@@ -446,8 +447,8 @@ function previewPastedReport(rawText) {
   const newStores = storeNums.filter(id => !stores[id]);
   const existingStores = storeNums.filter(id => stores[id]);
 
-  const statusEl = document.getElementById('pr-status');
-  const summaryEl = document.getElementById('pr-summary');
+  const statusEl = document.getElementById('parse-status');
+  const summaryEl = document.getElementById('parse-summary');
 
   if (statusEl) {
     statusEl.textContent = storeNums.length
@@ -461,7 +462,7 @@ function previewPastedReport(rawText) {
       <div style="margin-bottom:6px;"><strong>${existingStores.length}</strong> existing stores will be updated, <strong>${newStores.length}</strong> new stores will be added.</div>
       ${newStores.length ? `<div style="margin-bottom:6px;">New: ${newStores.map(id=>'#'+id).join(', ')}</div>` : ''}
       ${anomalies.length ? `<div style="color:#b45309;margin-bottom:6px;"><strong>${anomalies.length} thing(s) to check:</strong><br>${anomalies.map(a=>'• '+a).join('<br>')}</div>` : '<div style="color:#15803d;">No anomalies found.</div>'}
-      <button id="pr-apply-btn" class="btn-xs btn-queue" onclick="applyPastedReport()">Apply ${storeNums.length} stores to Inventory</button>
+      <button id="pr-apply-btn" class="btn btn-dark" style="width:100%;margin-top:.5rem" onclick="applyPastedReport()">Apply ${storeNums.length} stores to Inventory</button>
     ` : `
       ${anomalies.length ? `<div style="color:#b45309;">${anomalies.map(a=>'• '+a).join('<br>')}</div>` : ''}
       <div style="margin-top:6px;color:#666;">First 3 non-blank lines of what was pasted, for reference:<br>
@@ -471,12 +472,19 @@ function previewPastedReport(rawText) {
   }
 }
 
+// Wired to the real "Parse & update inventory" button in the upload
+// modal's paste tab (index.html calls handlePasteSubmit() directly).
+function handlePasteSubmit() {
+  const ta = document.getElementById('paste-input');
+  previewPastedReport(ta ? ta.value : '');
+}
+
 // Actually merge the staged report into `stores`, same pattern as a
 // Sheet refresh: overwrite S_jun/M_jun, preserve lastRestockedAt/note.
 async function applyPastedReport() {
   if (!pendingReportUpdates) return;
   const btn = document.getElementById('pr-apply-btn');
-  const statusEl = document.getElementById('pr-status');
+  const statusEl = document.getElementById('parse-status');
   if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
 
   try {
@@ -519,8 +527,8 @@ async function applyPastedReport() {
     renderInventory();
     populateCityDropdown(); // a pasted report can introduce new cities
 
-    if (statusEl) statusEl.textContent = `✅ Applied ${count} stores to Inventory. Syncing to the Sheet in the background — you can close this window now.`;
-    const summaryEl = document.getElementById('pr-summary');
+    if (statusEl) statusEl.textContent = `✅ Applied ${count} stores to Inventory. Syncing in the background — you can close this window now.`;
+    const summaryEl = document.getElementById('parse-summary');
     if (summaryEl) summaryEl.style.display = 'none';
     if (btn) { btn.textContent = 'Applied'; }
 
@@ -534,56 +542,14 @@ async function applyPastedReport() {
       ]);
       Promise.all(entries.map(([storeNum]) =>
         withTimeout(sheetAddStore({ storeId: storeNum, ...stores[storeNum] }), 8000)
-          .catch(e => console.warn('Background Sheet sync failed for store', storeNum, e))
-      )).then(() => console.log('Background Sheet sync finished for pasted report.'));
+          .catch(e => console.warn('Background sync failed for store', storeNum, e))
+      )).then(() => console.log('Background sync finished for pasted report.'));
     }
   } catch (err) {
     console.error('applyPastedReport failed:', err);
     if (statusEl) statusEl.textContent = `⚠️ Apply failed: ${err.message}. Open the browser console (F12 → Console tab) and share the red error text so I can fix it.`;
     if (btn) { btn.disabled = false; btn.textContent = 'Retry apply'; }
   }
-}
-
-// ── Self-contained "Paste report" popup ──────────────────────────
-// Built entirely in JS with its own unique element IDs (pr-*) so it
-// can never collide with parse-status/parse-summary/report-file-input
-// or any other IDs your existing HTML might already define for a
-// separate file-upload feature.
-function ensurePasteReportModal() {
-  if (document.getElementById('paste-report-modal')) return;
-  const modal = document.createElement('div');
-  modal.id = 'paste-report-modal';
-  modal.style.cssText = `
-    display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5);
-    z-index:9999; align-items:center; justify-content:center; padding:20px;
-  `;
-  modal.innerHTML = `
-    <div style="background:var(--bg,#fff); color:var(--ink,#111); padding:20px; border-radius:10px; width:600px; max-width:95vw; max-height:90vh; overflow:auto; font-family:inherit;">
-      <h3 style="margin:0 0 8px;">Paste inventory report</h3>
-      <p style="font-size:13px;color:#666;margin:0 0 10px;">
-        Paste a scan report: store #, address, city, state, zip, UPC, product, quantity — repeated per SKU per store.
-        Extra header rows, page numbers, or footer text anywhere are fine, they'll be skipped automatically.
-      </p>
-      <textarea id="pr-textarea" rows="10" style="width:100%;box-sizing:border-box;padding:8px;font-family:monospace;font-size:12px;"></textarea>
-      <div style="margin-top:10px;display:flex;gap:8px;">
-        <button class="btn-xs btn-queue" onclick="previewPastedReport(document.getElementById('pr-textarea').value)">Parse pasted report</button>
-        <button class="btn-xs" onclick="closePasteReportModal()">Close</button>
-      </div>
-      <div id="pr-status" style="margin-top:10px;font-size:13px;"></div>
-      <div id="pr-summary" style="display:none;margin-top:8px;font-size:13px;"></div>
-    </div>`;
-  document.body.appendChild(modal);
-}
-
-function openPasteReportModal() {
-  ensurePasteReportModal();
-  clearParseState();
-  document.getElementById('paste-report-modal').style.display = 'flex';
-}
-
-function closePasteReportModal() {
-  const m = document.getElementById('paste-report-modal');
-  if (m) m.style.display = 'none';
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1025,14 +991,24 @@ function renderInventory() {
 // stocked, it won't force a spicy case into the delivery just
 // because mild needs one, and vice versa. If the store's fine on
 // both (rare reason to hit Queue), it falls back to a 1/1 top-up.
+// Shared restock-quantity logic: each flavor is sized off its OWN
+// current count, independent of the other — so a store that's out of
+// mild but fine on spicy only gets mild queued, not both. Used by both
+// the single "Queue" button and the bulk "New Delivery Run" so they
+// never disagree with each other.
+function computeRestockQty(s, m) {
+  let spicyQty = s === 0 ? 2 : s < LOW_STOCK_THRESHOLD ? 1 : 0;
+  let mildQty  = m === 0 ? 2 : m < LOW_STOCK_THRESHOLD ? 1 : 0;
+  if (spicyQty === 0 && mildQty === 0) { spicyQty = 1; mildQty = 1; }
+  return { spicyQty, mildQty };
+}
+
 async function queueDelivery(storeId) {
   const d = stores[storeId]; if (!d) return;
   const s = clamp(d.S_jun), m = clamp(d.M_jun);
   const st = stockStatus(s, m);
 
-  let spicyQty = s === 0 ? 1 : s <= 5 ? 1 : 0;
-  let mildQty  = m === 0 ? 1 : m <=53 ? 1 : 0;
-  if (spicyQty === 0 && mildQty === 0) { spicyQty = 1; mildQty = 1; }
+  const { spicyQty, mildQty } = computeRestockQty(s, m);
 
   const autoNote = st === 'urgent' ? 'Urgent restock — both SKUs out'
                  : st === 'low'    ? 'Low stock restock'
@@ -1339,10 +1315,12 @@ async function saveRun() {
   const newRecs = checked.map(cb => {
     const id = Number(cb.value);
     const d  = stores[id] || {};
+    const s  = clamp(d.S_jun), m = clamp(d.M_jun);
+    const { spicyQty, mildQty } = computeRestockQty(s, m);
     return {
       id: String(Date.now()+Math.random()),
       storeId:id, addr:d.addr||'', city:d.city||'', zip:d.zip||'',
-      spicy:1, mild:1, driver, date,
+      spicy:spicyQty, mild:mildQty, driver, date,
       status:'pending', notes:'',
       appliedSpicy:0, appliedMild:0,
       createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(),
@@ -1680,18 +1658,12 @@ function sendEmail() {
 // UPLOAD MODAL
 // ══════════════════════════════════════════════════════════════
 function openUploadModal() {
-  // Reset any pre-existing file-upload UI, if your HTML has one — all
-  // guarded, so this is a no-op if those elements don't exist.
   const area = document.getElementById('parse-drop-area');
   if (area) { area.style.borderColor=''; area.style.background=''; }
   const fileInput = document.getElementById('report-file-input');
   if (fileInput) fileInput.value = '';
-  const existingModal = document.getElementById('upload-modal');
-  if (existingModal) existingModal.classList.add('open');
-
-  // Self-contained paste-based import — independent of whatever your
-  // existing upload-modal's internal structure looks like.
-  openPasteReportModal();
+  clearParseState();
+  document.getElementById('upload-modal').classList.add('open');
 }
 
 
@@ -1704,20 +1676,12 @@ function switchImportTab(name, el) {
 }
 
 function clearParseState() {
-  // Legacy elements from any pre-existing file-upload UI, if present.
   const status  = document.getElementById('parse-status');
   const summary = document.getElementById('parse-summary');
+  const pasteInput = document.getElementById('paste-input');
   if (status)  status.textContent = '';
   if (summary) { summary.style.display = 'none'; summary.innerHTML = ''; }
-
-  // This feature's own self-contained elements.
-  const prStatus  = document.getElementById('pr-status');
-  const prSummary = document.getElementById('pr-summary');
-  const prTextarea = document.getElementById('pr-textarea');
-  if (prStatus)  prStatus.textContent = '';
-  if (prSummary) { prSummary.style.display = 'none'; prSummary.innerHTML = ''; }
-  if (prTextarea) prTextarea.value = '';
-
+  if (pasteInput) pasteInput.value = '';
   pendingReportUpdates = null;
 }
 
