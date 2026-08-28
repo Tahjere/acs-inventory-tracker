@@ -469,6 +469,7 @@ async function applyPastedReport() {
     const count = entries.length;
     pendingReportUpdates = null;
     renderInventory();
+    populateCityDropdown(); // a pasted report can introduce new cities
 
     if (statusEl) statusEl.textContent = `✅ Applied ${count} stores to Inventory. Syncing to the Sheet in the background — you can close this window now.`;
     const summaryEl = document.getElementById('pr-summary');
@@ -740,6 +741,7 @@ function ensureCityFilterBar() {
       <button class="btn-xs btn-queue" onclick="openRouteForCityView()">🗺️ Route for this view</button>
     `;
     rightContainer.insertBefore(wrap, rightContainer.firstChild);
+    populateCityDropdown();
   }
 
   // Fallback only if neither expected container exists — keeps the
@@ -760,6 +762,7 @@ function ensureCityFilterBar() {
       <button class="btn-xs btn-queue" onclick="openRouteForCityView()">🗺️ Route for this view</button>
     `;
     stats.insertAdjacentElement('afterend', bar);
+    populateCityDropdown();
   }
 }
 
@@ -791,6 +794,18 @@ function populateCityDropdown() {
   sel.innerHTML = `<option value="all">All cities (${entries.length})</option>` +
     entries.map(([norm, label]) => `<option value="${norm}">${label}</option>`).join('');
   sel.value = cityFilter;
+}
+
+// Cheap, safe to call on every render: keeps the dropdown's selected
+// value in sync WITHOUT touching its <option> list. Rebuilding the
+// options themselves on every render — including from inside the
+// select's own onchange handler — is what caused the filter to
+// degrade after repeated use; this avoids that for the common case.
+// The full rebuild (above) only needs to run when the set of cities
+// could actually have changed (new stores added).
+function syncCityDropdownValue() {
+  const sel = document.getElementById('inv-city-select');
+  if (sel && sel.value !== cityFilter) sel.value = cityFilter;
 }
 
 function setCityFilter(city) {
@@ -848,7 +863,7 @@ function renderInventory() {
   `;
 
   ensureCityFilterBar();
-  populateCityDropdown();
+  syncCityDropdownValue();
   ensureInvRouteSortOption();
 
   // Filter
@@ -1567,6 +1582,7 @@ async function saveNewStore() {
 
   await sheetAddStore({ storeId:num, ...rec, addedAt:new Date().toISOString() });
   renderInventory();
+  populateCityDropdown(); // a manually-added store can introduce a new city
   closeModal('addstore-modal');
 }
 
