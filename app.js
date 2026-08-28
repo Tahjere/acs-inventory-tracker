@@ -763,12 +763,24 @@ function ensureCityFilterBar() {
   }
 }
 
+// Case-insensitive comparison key — pasted reports use ALL CAPS city
+// names, other sources may not, so "Virginia Beach" and "VIRGINIA
+// BEACH" need to be treated as the same city, not two different ones.
+function normalizeCity(c) {
+  return String(c || '').trim().toLowerCase();
+}
+
 function populateCityDropdown() {
   const sel = document.getElementById('inv-city-select');
   if (!sel) return;
-  const cities = Array.from(new Set(Object.values(stores).map(s => s.city).filter(Boolean))).sort();
-  sel.innerHTML = `<option value="all">All cities (${cities.length})</option>` +
-    cities.map(c => `<option value="${c}">${c}</option>`).join('');
+  const seen = new Map(); // normalized city -> a display label (first one seen)
+  Object.values(stores).forEach(s => {
+    const norm = normalizeCity(s.city);
+    if (norm && !seen.has(norm)) seen.set(norm, s.city);
+  });
+  const entries = Array.from(seen.entries()).sort((a, b) => a[1].localeCompare(b[1]));
+  sel.innerHTML = `<option value="all">All cities (${entries.length})</option>` +
+    entries.map(([norm, label]) => `<option value="${norm}">${label}</option>`).join('');
   sel.value = cityFilter;
 }
 
@@ -840,7 +852,7 @@ function renderInventory() {
     if (invFilter==='dropped' && !bigDrop(id))  return false;
     if (invFilter==='spicy-needs' && s >= LOW_STOCK_THRESHOLD) return false;
     if (invFilter==='mild-needs'  && m >= LOW_STOCK_THRESHOLD) return false;
-    if (cityFilter !== 'all' && d.city !== cityFilter) return false;
+    if (cityFilter !== 'all' && normalizeCity(d.city) !== cityFilter) return false;
     if (search) {
       const hay = `${id} ${d.city} ${d.addr}`.toLowerCase();
       if (!hay.includes(search)) return false;
