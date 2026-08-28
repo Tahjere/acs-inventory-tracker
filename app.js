@@ -76,15 +76,27 @@ async function refreshFromSheet() {
     localStorage.setItem('ac_sales', JSON.stringify(sheetSales));
   }
   if (sheetStores && sheetStores.length) {
+    // Only let a field from the Sheet overwrite what's already known
+    // locally when the Sheet actually has a real value for it. If the
+    // background sync after a paste-report import didn't fully land
+    // for a store, its Sheet row may be blank/incomplete — without
+    // this guard, that blank would silently wipe out good local data
+    // (city, or worse, stock counts) on every page reload. 0 is a
+    // legitimate stock value, so this checks presence, not truthiness.
+    const has = v => v !== undefined && v !== null && v !== '';
     sheetStores.forEach(s => {
       // Preserve locally-tracked restock history — the report only
       // carries the raw counts, not lastRestockedAt/lastRestockNote.
       const prev = stores[s.storeId] || {};
       stores[s.storeId] = {
         ...prev,
-        addr: s.addr, city: s.city, zip: s.zip,
-        S_may: Number(s.S_may)||0, M_may: Number(s.M_may)||0,
-        S_jun: Number(s.S_jun)||0, M_jun: Number(s.M_jun)||0,
+        addr: has(s.addr) ? s.addr : (prev.addr || ''),
+        city: has(s.city) ? s.city : (prev.city || ''),
+        zip:  has(s.zip)  ? s.zip  : (prev.zip  || ''),
+        S_may: has(s.S_may) ? Number(s.S_may) : clamp(prev.S_may),
+        M_may: has(s.M_may) ? Number(s.M_may) : clamp(prev.M_may),
+        S_jun: has(s.S_jun) ? Number(s.S_jun) : clamp(prev.S_jun),
+        M_jun: has(s.M_jun) ? Number(s.M_jun) : clamp(prev.M_jun),
       };
     });
     const overrides = {};
@@ -94,6 +106,7 @@ async function refreshFromSheet() {
     localStorage.setItem('ac_stores', JSON.stringify(overrides));
   }
   renderAll();
+  populateCityDropdown(); // in case the fix above just restored cities that were previously blanked out
 }
 
 function normalizeDelivery(d) {
