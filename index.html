@@ -186,7 +186,7 @@ Example of what it looks like:
 
       <div style="margin-top:1rem;padding-top:.875rem;border-top:1px solid var(--border);font-size:12px;color:var(--ink3);line-height:1.6">
         <strong>What happens either way:</strong>
-        Current counts roll to "previous" · New counts become current · Delta column updates · Google Sheets syncs · New stores auto-added
+        Current counts roll to "previous" · New counts become current · Delta column updates · Data syncs · New stores auto-added
       </div>
     </div>
     <div class="modal-footer">
@@ -331,7 +331,8 @@ TJ — TTP Foods LLC</textarea>
 </div>
 
 <script src="data.js"></script>
-<script src="sheets.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="supabase-client.js"></script>
 <script src="parser.js"></script>
 <script src="app.js"></script>
 </body>
