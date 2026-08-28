@@ -28,7 +28,7 @@ const SUPABASE_KEY = 'sb_publishable_PjS3uIMy8vKwRyGnwcKJuQ_jLceCG03';
 const SHEET_CONFIGURED = true; // gates sync-dot/boot behavior in app-logic.js
 const SHEET_URL = '';          // paste your EXISTING Apps Script URL here to keep the write-only backup mirror; leave blank to skip it entirely
 
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+//const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ── Connection test / sync indicator ──────────────────────────
 async function testSheetConnection() {
