@@ -718,21 +718,49 @@ function renderInvDeliveryControls(storeId) {
 // Inventory table once. Rebuilds the dropdown's options every render
 // so newly-added stores (e.g. from a pasted report) show up.
 function ensureCityFilterBar() {
-  if (document.getElementById('inv-city-bar')) return;
-  const stats = document.getElementById('inv-stats');
-  if (!stats) return;
-  const bar = document.createElement('div');
-  bar.id = 'inv-city-bar';
-  bar.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0;';
-  bar.innerHTML = `
-    <button class="pill" onclick="setInvFilter('spicy-needs', this)">🌶️ Low spicy</button>
-    <button class="pill" onclick="setInvFilter('mild-needs', this)">🧡 Low mild</button>
-    <span style="width:1px;height:20px;background:var(--border,#e5e2dc);"></span>
-    <label style="font-size:12px;color:var(--ink3,#777);">City:</label>
-    <select id="inv-city-select" onchange="setCityFilter(this.value)"></select>
-    <button class="btn-xs btn-queue" onclick="openRouteForCityView()">🗺️ Route for this view</button>
-  `;
-  stats.insertAdjacentElement('afterend', bar);
+  // Fold these into the EXISTING filter-pills / control-right groups
+  // (same row as All / Both out / Low stock / Search / Sort / Export)
+  // instead of a separate floating row on top of it.
+  const pillsContainer = document.querySelector('#tab-inventory .filter-pills');
+  const rightContainer = document.querySelector('#tab-inventory .control-right');
+
+  if (pillsContainer && !document.getElementById('inv-pill-spicy-needs')) {
+    pillsContainer.insertAdjacentHTML('beforeend', `
+      <button id="inv-pill-spicy-needs" class="pill" onclick="setInvFilter('spicy-needs', this)">🌶️ Low spicy</button>
+      <button id="inv-pill-mild-needs" class="pill" onclick="setInvFilter('mild-needs', this)">🧡 Low mild</button>
+    `);
+  }
+
+  if (rightContainer && !document.getElementById('inv-city-select')) {
+    const wrap = document.createElement('span');
+    wrap.style.cssText = 'display:flex;align-items:center;gap:6px;';
+    wrap.innerHTML = `
+      <label style="font-size:12px;color:var(--ink3,#777);">City:</label>
+      <select id="inv-city-select" onchange="setCityFilter(this.value)"></select>
+      <button class="btn-xs btn-queue" onclick="openRouteForCityView()">🗺️ Route for this view</button>
+    `;
+    rightContainer.insertBefore(wrap, rightContainer.firstChild);
+  }
+
+  // Fallback only if neither expected container exists — keeps the
+  // feature working even if the real HTML doesn't match these class
+  // names, rather than silently doing nothing.
+  if (!pillsContainer && !rightContainer && !document.getElementById('inv-city-bar')) {
+    const stats = document.getElementById('inv-stats');
+    if (!stats) return;
+    const bar = document.createElement('div');
+    bar.id = 'inv-city-bar';
+    bar.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0;';
+    bar.innerHTML = `
+      <button class="pill" onclick="setInvFilter('spicy-needs', this)">🌶️ Low spicy</button>
+      <button class="pill" onclick="setInvFilter('mild-needs', this)">🧡 Low mild</button>
+      <span style="width:1px;height:20px;background:var(--border,#e5e2dc);"></span>
+      <label style="font-size:12px;color:var(--ink3,#777);">City:</label>
+      <select id="inv-city-select" onchange="setCityFilter(this.value)"></select>
+      <button class="btn-xs btn-queue" onclick="openRouteForCityView()">🗺️ Route for this view</button>
+    `;
+    stats.insertAdjacentElement('afterend', bar);
+  }
 }
 
 function populateCityDropdown() {
