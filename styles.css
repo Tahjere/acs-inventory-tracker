@@ -1,5 +1,12 @@
 /* ============================================================
-   AUNT CAROL'S SAUCE — DASHBOARD STYLES  v2
+   AUNT CAROL'S SAUCE — DASHBOARD STYLES  v3
+   v3 changes: fixes a mobile bug where the header (date badge +
+   New Report / Add Store / Email Rachel buttons) had no wrap rule
+   at all, so on a narrow screen it overflowed sideways instead of
+   wrapping — showing as a horizontally-scrolled sliver with content
+   cut off on both edges. Added: html/body overflow guard, header
+   wrap + auto-height on mobile, shrunk header-right buttons on
+   mobile, and a horizontally-scrollable fallback for the tab bar.
    ============================================================ */
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -32,6 +39,15 @@
   --count-h:   30px;
   --radius:    6px;
   --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif;
+}
+
+html, body {
+  /* Defensive guard: if any element on the page ever ends up wider
+     than the viewport, this keeps it from dragging the WHOLE page
+     into horizontal scroll — the offending element scrolls within
+     itself (or just clips) instead of everything shifting together. */
+  overflow-x: hidden;
+  width: 100%;
 }
 
 body {
@@ -124,7 +140,14 @@ header h1 {
   position: sticky;
   top: var(--header-h);
   z-index: 90;
+  /* Fallback for narrow screens: scroll the tab strip itself instead
+     of wrapping tabs onto a second line or letting them overflow the
+     page. */
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
 }
+.tab-bar::-webkit-scrollbar { display: none; }
 
 .tab {
   background: none;
@@ -138,6 +161,7 @@ header h1 {
   margin-bottom: -1px;
   transition: color .12s, border-color .12s;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .tab:hover  { color: var(--ink); }
 .tab.active { color: var(--ink); border-bottom-color: var(--ink); }
@@ -233,7 +257,11 @@ header h1 {
 }
 
 /* ── Table ─────────────────────────────────────────────────── */
-.table-wrap { overflow-x: auto; }
+.table-wrap {
+  overflow-x: auto;
+  width: 100%;
+  -webkit-overflow-scrolling: touch;
+}
 
 table {
   width: 100%;
@@ -537,6 +565,31 @@ pre#dispatch-text {
 
 /* ── Mobile ────────────────────────────────────────────────── */
 @media (max-width: 640px) {
+  /* Header: this is the piece that had NO mobile rule at all before —
+     it's a non-wrapping flex row, so on a narrow screen its content
+     (date badge + New Report + Add Store + Email Rachel) overflowed
+     sideways instead of wrapping, dragging the header (and, without
+     the html/body overflow guard above, potentially the whole page)
+     into horizontal scroll. */
+  header {
+    height: auto;
+    min-height: var(--header-h);
+    flex-wrap: wrap;
+    row-gap: 8px;
+    padding: .625rem .875rem;
+  }
+  .header-left  { flex: 1 1 auto; min-width: 0; }
+  .header-right {
+    flex-wrap: wrap;
+    width: 100%;
+    justify-content: flex-start;
+    gap: 6px;
+  }
+  .header-right .btn {
+    font-size: 11px;
+    padding: 5px 9px;
+  }
+
   header h1       { font-size: 13px; }
   .header-sub     { display: none; }
   .addr-cell      { display: none; }
