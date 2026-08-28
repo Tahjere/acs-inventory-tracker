@@ -1030,8 +1030,8 @@ async function queueDelivery(storeId) {
   const s = clamp(d.S_jun), m = clamp(d.M_jun);
   const st = stockStatus(s, m);
 
-  let spicyQty = s === 0 ? 2 : s <= 3 ? 1 : 0;
-  let mildQty  = m === 0 ? 2 : m <= 3 ? 1 : 0;
+  let spicyQty = s === 0 ? 1 : s <= 5 ? 1 : 0;
+  let mildQty  = m === 0 ? 1 : m <=53 ? 1 : 0;
   if (spicyQty === 0 && mildQty === 0) { spicyQty = 1; mildQty = 1; }
 
   const autoNote = st === 'urgent' ? 'Urgent restock — both SKUs out'
