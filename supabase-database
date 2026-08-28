@@ -1,0 +1,243 @@
+// ============================================================
+// AUNT CAROL'S SAUCE — SUPABASE DATA LAYER  v1
+// Replaces the Google Sheets Apps Script backend as the app's live,
+// real-time data source. Still writes to the old Sheet too (best
+// effort, one-way, non-blocking) so it keeps working as a human-
+// readable backup/export — but the app never READS from Sheets again,
+// which is what avoids the sync-conflict/stale-overwrite bugs from
+// earlier in this build.
+//
+// SETUP — three things still needed:
+// 1. Paste your Supabase Project URL below (SUPABASE_URL).
+// 2. Add these to index.html, BEFORE your app-logic.js <script> tag:
+//      <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+//      <script src="supabase-client.js"></script>
+// 3. Two small edits still needed in app-logic.js — see the note at
+//    the very bottom of this file.
+//
+// KNOWN GUESS, FLAGGED: mirrorToSheet() below is a best-guess request
+// shape for your existing Apps Script — I've never seen that backend
+// code (only what calls it from app-logic.js), so this may not match
+// its actual expected format. If the mirror doesn't work, share that
+// script with me and I'll match it exactly instead of guessing.
+// ============================================================
+
+const SUPABASE_URL = 'https://fsyypypudlaaretqkzwj.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_PjS3uIMy8vKwRyGnwcKJuQ_jLceCG03';
+
+const SHEET_CONFIGURED = true; // gates sync-dot/boot behavior in app-logic.js
+const SHEET_URL = '';          // paste your EXISTING Apps Script URL here to keep the write-only backup mirror; leave blank to skip it entirely
+
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// ── Connection test / sync indicator ──────────────────────────
+async function testSheetConnection() {
+  setSyncStatus('busy', 'Connecting…');
+  try {
+    const { error } = await supabase.from('stores').select('store_id').limit(1);
+    if (error) throw error;
+    setSyncStatus('ok', 'Connected');
+  } catch (e) {
+    console.error('Supabase connection failed:', e);
+    setSyncStatus('err', 'Connection failed');
+  }
+}
+
+function setSyncStatus(state, label) {
+  const dot = document.getElementById('sync-dot');
+  const text = document.getElementById('sync-label');
+  if (dot) dot.className = 'sync-dot ' + state; // ok | busy | err
+  if (text) text.textContent = label || '';
+}
+
+// ── Best-effort, write-only mirror to the old Google Sheet ─────
+// Fire-and-forget: never awaited by anything that matters, never
+// allowed to throw out to a caller, never used as a read source.
+function mirrorToSheet(action, payload) {
+  if (!SHEET_URL) return;
+  fetch(SHEET_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' }, // avoids a CORS preflight on Apps Script
+    body: JSON.stringify({ action, ...payload }),
+  }).catch(e => console.warn('Sheet mirror failed (non-fatal):', action, e));
+}
+
+// ── Field mapping: JS camelCase <-> Postgres snake_case ────────
+function deliveryToRow(d) {
+  return {
+    id: d.id, store_id: String(d.storeId), addr: d.addr, city: d.city, zip: d.zip,
+    spicy: d.spicy, mild: d.mild, driver: d.driver, date: d.date,
+    status: d.status, notes: d.notes,
+    applied_spicy: d.appliedSpicy || 0, applied_mild: d.appliedMild || 0,
+    created_at: d.createdAt, updated_at: d.updatedAt,
+  };
+}
+function rowToDelivery(r) {
+  return {
+    id: r.id, storeId: Number(r.store_id), addr: r.addr, city: r.city, zip: r.zip,
+    spicy: r.spicy, mild: r.mild, driver: r.driver, date: r.date,
+    status: r.status, notes: r.notes,
+    appliedSpicy: r.applied_spicy, appliedMild: r.applied_mild,
+    createdAt: r.created_at, updatedAt: r.updated_at,
+  };
+}
+function saleToRow(s) {
+  return {
+    delivery_id: s.deliveryId, store_id: String(s.storeId), addr: s.addr, city: s.city, zip: s.zip,
+    driver: s.driver, date: s.date,
+    spicy_cases: s.spicyCases, mild_cases: s.mildCases, total_cases: s.totalCases,
+    spicy_units: s.spicyUnits, mild_units: s.mildUnits,
+    revenue: s.revenue, cogs: s.cogs, delivery_fee: s.deliveryFee, gross_profit: s.grossProfit,
+    recorded_at: s.recordedAt,
+  };
+}
+function rowToSale(r) {
+  return {
+    deliveryId: r.delivery_id, storeId: Number(r.store_id), addr: r.addr, city: r.city, zip: r.zip,
+    driver: r.driver, date: r.date,
+    spicyCases: r.spicy_cases, mildCases: r.mild_cases, totalCases: r.total_cases,
+    spicyUnits: r.spicy_units, mildUnits: r.mild_units,
+    revenue: r.revenue, cogs: r.cogs, deliveryFee: r.delivery_fee, grossProfit: r.gross_profit,
+    recordedAt: r.recorded_at,
+  };
+}
+function storeToRow(storeId, s) {
+  return {
+    store_id: String(storeId), addr: s.addr, city: s.city, zip: s.zip,
+    s_may: s.S_may || 0, m_may: s.M_may || 0, s_jun: s.S_jun || 0, m_jun: s.M_jun || 0,
+    last_restocked_at: s.lastRestockedAt || null, last_restock_note: s.lastRestockNote || null,
+  };
+}
+function rowToStore(r) {
+  return {
+    storeId: r.store_id, addr: r.addr, city: r.city, zip: r.zip,
+    S_may: r.s_may, M_may: r.m_may, S_jun: r.s_jun, M_jun: r.m_jun,
+    lastRestockedAt: r.last_restocked_at, lastRestockNote: r.last_restock_note,
+  };
+}
+
+// ── Stores ──────────────────────────────────────────────────
+// app-logic.js's refreshFromSheet() currently fetches stores via a raw
+// fetch() to SHEET_URL — swap that one spot to call this instead (see
+// the note at the bottom of this file).
+async function supabaseGetStores() {
+  try {
+    const { data, error } = await supabase.from('stores').select('*');
+    if (error) throw error;
+    return (data || []).map(rowToStore);
+  } catch (e) {
+    console.error('supabaseGetStores failed:', e);
+    return [];
+  }
+}
+
+// Upsert — used both for creating a new store and for pushing updated
+// stock counts (matches how app-logic.js already treats sheetAddStore
+// as an upsert).
+async function sheetAddStore(storeObj) {
+  const { storeId, ...rest } = storeObj;
+  const row = storeToRow(storeId, rest);
+  try {
+    const { error } = await supabase.from('stores').upsert(row, { onConflict: 'store_id' });
+    if (error) throw error;
+  } catch (e) {
+    console.error('sheetAddStore (Supabase) failed:', e);
+  }
+  mirrorToSheet('addStore', { storeId, ...rest });
+}
+
+// ── Deliveries ──────────────────────────────────────────────
+async function sheetGetDeliveries() {
+  try {
+    const { data, error } = await supabase.from('deliveries').select('*');
+    if (error) throw error;
+    return (data || []).map(rowToDelivery);
+  } catch (e) {
+    console.error('sheetGetDeliveries (Supabase) failed:', e);
+    return null;
+  }
+}
+
+async function sheetAddDelivery(rec) {
+  try {
+    const { error } = await supabase.from('deliveries').insert(deliveryToRow(rec));
+    if (error) throw error;
+  } catch (e) {
+    console.error('sheetAddDelivery (Supabase) failed:', e);
+  }
+  mirrorToSheet('addDelivery', rec);
+}
+
+async function sheetUpdateDelivery(d) {
+  try {
+    const { error } = await supabase.from('deliveries').update(deliveryToRow(d)).eq('id', d.id);
+    if (error) throw error;
+  } catch (e) {
+    console.error('sheetUpdateDelivery (Supabase) failed:', e);
+  }
+  mirrorToSheet('updateDelivery', d);
+}
+
+async function sheetDeleteDelivery(delivId) {
+  try {
+    const { error } = await supabase.from('deliveries').delete().eq('id', delivId);
+    if (error) throw error;
+  } catch (e) {
+    console.error('sheetDeleteDelivery (Supabase) failed:', e);
+  }
+  mirrorToSheet('deleteDelivery', { id: delivId });
+}
+
+// ── Sales ───────────────────────────────────────────────────
+async function sheetGetSales() {
+  try {
+    const { data, error } = await supabase.from('sales').select('*');
+    if (error) throw error;
+    return (data || []).map(rowToSale);
+  } catch (e) {
+    console.error('sheetGetSales (Supabase) failed:', e);
+    return null;
+  }
+}
+
+async function sheetAddSale(sale) {
+  try {
+    const { error } = await supabase.from('sales').upsert(saleToRow(sale), { onConflict: 'delivery_id' });
+    if (error) throw error;
+  } catch (e) {
+    console.error('sheetAddSale (Supabase) failed:', e);
+  }
+  mirrorToSheet('addSale', sale);
+}
+
+// ── Realtime: push updates to every open browser ────────────
+// Any insert/update/delete on these tables triggers a full re-pull —
+// simple and robust for a dataset this size, and avoids subtle merge
+// bugs from trying to patch in just the one changed row.
+function initSupabaseRealtime() {
+  supabase
+    .channel('aunt-carols-live')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'stores' },     () => refreshFromSheet())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, () => refreshFromSheet())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'sales' },      () => refreshFromSheet())
+    .subscribe();
+}
+
+// ============================================================
+// TWO SMALL CHANGES STILL NEEDED IN app-logic.js:
+//
+// 1. Inside refreshFromSheet(), replace the raw fetch for stores:
+//      (async () => { try {
+//        const r = await fetch(SHEET_URL + '?action=getStores');
+//        const j = await r.json(); return j.data || [];
+//      } catch(e) { return []; }})()
+//    with just:
+//      supabaseGetStores()
+//
+// 2. Inside boot(), right after startAutoSync(), add:
+//      initSupabaseRealtime();
+//    This is what makes updates push instantly instead of waiting for
+//    the 20-second poll. You can leave the polling in as a fallback,
+//    or remove it later once realtime is confirmed working — either
+//    is fine, they don't conflict.
+// ============================================================
