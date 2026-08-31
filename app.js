@@ -1,21 +1,23 @@
 // ============================================================
-// AUNT CAROL'S SAUCE — APP LOGIC  v9  (this file is your app.js)
-// Storage: Supabase (primary, realtime) + Google Sheets (write-only
-// backup mirror, via supabase-client.js) + localStorage (offline cache)
+// AUNT CAROL'S SAUCE — APP LOGIC  v10  (this file is your app.js)
+// Storage: Supabase ONLY (primary + realtime), mirrored write-only
+// to Google Sheets as a human-readable backup export.
 //
-// v9 change: now that the real index.html is known, the paste-report
-// parser (rewritten in v8 to tolerate messy pasted text) is wired into
-// the ACTUAL "Parse & update inventory" button and its real elements
-// (#paste-input, #parse-status, #parse-summary) inside your existing
-// upload modal — not a separate popup. An earlier version of this file
-// built its own floating popup because the real HTML wasn't available
-// yet; that's been removed. parser.js's handleReportUpload() (.docx
-// upload tab) is untouched — that file has never been shared with me.
+// v10 change: localStorage removed completely as a data store
+// (ac_stores / ac_deliveries / ac_sales are gone). With multiple
+// drivers on multiple phones, a per-device local cache was a second
+// source of truth that could silently overwrite real updates —
+// Supabase is now the only place data lives; every read comes from
+// it, every write blocks on it, and realtime pushes changes to every
+// open screen. Also includes the units-per-case fix so a delivered
+// case adds PRICING.unitsPerCase (12) units on top of existing stock,
+// not just +1.
 // ============================================================
 
 // ── State ───────────────────────────────────────────────────
-let stores      = {};   // merged BASE_STORES + sheet/localStorage additions
-let deliveries  = [];   // from Sheet (or localStorage fallback)
+let stores      = {};   // sourced from Supabase, in-memory only
+let deliveries  = [];   // sourced from Supabase, in-memory only
+let sales       = [];   // sourced from Supabase, in-memory only
 let currentEditId = null;
 let currentEditSaleId = null;
 let currentFilteredDeliveries = []; // snapshot of what's on-screen, for bulk actions
@@ -33,12 +35,11 @@ let salesFilter = 'all';
 // ── Boot ─────────────────────────────────────────────────────
 let autoSyncTimer = null;
 let autoSyncInFlight = false;
-const AUTO_SYNC_INTERVAL_MS = 20000; // how often devices re-check the Sheet
+const AUTO_SYNC_INTERVAL_MS = 20000; // how often devices re-check the DB
 
 async function boot() {
-  loadStoresLocal();
-  loadDeliveriesLocal();   // show cached data instantly
-  renderAll();
+  stores = { ...BASE_STORES }; // seed defaults only, overwritten by Supabase below
+  renderAll(); // paint the shell so tabs/dropdowns exist while we fetch
 
   // Set default date in run modal
   const rd = document.getElementById('run-date');
@@ -55,19 +56,20 @@ async function boot() {
     startAutoSync();
     if (typeof initSupabaseRealtime === 'function') initSupabaseRealtime();
   } else {
-    setSyncStatus('err', 'Sheet not configured');
+    setSyncStatus('err', 'Database not configured');
     const banner = document.getElementById('config-banner');
     if (banner) banner.style.display = 'block';
   }
 }
 
-// Keeps every open device converging on the same Sheet data without
-// needing a manual reload. Not instant push-based real-time — there's
-// up to AUTO_SYNC_INTERVAL_MS of lag — but for a shared inventory list
-// that's normally indistinguishable from it in practice. Only actually
-// hits the network while the tab is in the foreground, and does one
-// extra sync immediately whenever you switch back to the tab so you're
-// never stuck waiting out the rest of the interval.
+// Keeps every open device converging on the same DB data without
+// needing a manual reload. Not instant push-based real-time on its
+// own — that's what initSupabaseRealtime() is for — this is the
+// fallback poll so a device that missed a realtime event still
+// catches up within AUTO_SYNC_INTERVAL_MS. Only actually hits the
+// network while the tab is in the foreground, and does one extra sync
+// immediately whenever you switch back to the tab so you're never
+// stuck waiting out the rest of the interval.
 async function runAutoSync() {
   if (autoSyncInFlight || !SHEET_CONFIGURED) return;
   autoSyncInFlight = true;
@@ -93,7 +95,7 @@ function startAutoSync() {
   });
 }
 
-// ── Pull fresh data from Sheet ────────────────────────────────
+// ── Pull fresh data from Supabase ────────────────────────────
 async function refreshFromSheet() {
   const [sheetDels, sheetSales, sheetStores] = await Promise.all([
     sheetGetDeliveries(),
@@ -103,23 +105,20 @@ async function refreshFromSheet() {
 
   if (sheetDels !== null) {
     deliveries = sheetDels.map(normalizeDelivery);
-    localStorage.setItem('ac_deliveries', JSON.stringify(deliveries));
   }
   if (sheetSales !== null) {
-    localStorage.setItem('ac_sales', JSON.stringify(sheetSales));
+    sales = sheetSales;
   }
   if (sheetStores && sheetStores.length) {
-    // Only let a field from the Sheet overwrite what's already known
-    // locally when the Sheet actually has a real value for it. If the
+    // Only let a field from the DB overwrite what's already known
+    // locally when the DB actually has a real value for it. If the
     // background sync after a paste-report import didn't fully land
-    // for a store, its Sheet row may be blank/incomplete — without
-    // this guard, that blank would silently wipe out good local data
-    // (city, or worse, stock counts) on every page reload. 0 is a
-    // legitimate stock value, so this checks presence, not truthiness.
+    // for a store, its row may be blank/incomplete — without this
+    // guard, that blank would silently wipe out good data (city, or
+    // worse, stock counts) on the next refresh. 0 is a legitimate
+    // stock value, so this checks presence, not truthiness.
     const has = v => v !== undefined && v !== null && v !== '';
     sheetStores.forEach(s => {
-      // Preserve locally-tracked restock history — the report only
-      // carries the raw counts, not lastRestockedAt/lastRestockNote.
       const prev = stores[s.storeId] || {};
       stores[s.storeId] = {
         ...prev,
@@ -130,13 +129,10 @@ async function refreshFromSheet() {
         M_may: has(s.M_may) ? Number(s.M_may) : clamp(prev.M_may),
         S_jun: has(s.S_jun) ? Number(s.S_jun) : clamp(prev.S_jun),
         M_jun: has(s.M_jun) ? Number(s.M_jun) : clamp(prev.M_jun),
+        lastRestockedAt: has(s.lastRestockedAt) ? s.lastRestockedAt : prev.lastRestockedAt,
+        lastRestockNote: has(s.lastRestockNote) ? s.lastRestockNote : prev.lastRestockNote,
       };
     });
-    const overrides = {};
-    Object.keys(stores).forEach(id => {
-      if (!BASE_STORES[id]) overrides[id] = stores[id];
-    });
-    localStorage.setItem('ac_stores', JSON.stringify(overrides));
   }
   renderAll();
   populateCityDropdown(); // in case the fix above just restored cities that were previously blanked out
@@ -150,25 +146,13 @@ function normalizeDelivery(d) {
     driver: d.driver||'', date: d.date||today(),
     status: d.status||'pending', notes: d.notes||'',
     // How much of this delivery's spicy/mild has already been applied
-    // to store stock — used to avoid double-counting on edits/reloads.
+    // to store stock (in UNITS) — used to avoid double-counting on
+    // edits/reloads.
     appliedSpicy: Number(d.appliedSpicy)||0,
     appliedMild:  Number(d.appliedMild)||0,
     createdAt: d.createdAt||new Date().toISOString(),
     updatedAt: d.updatedAt||new Date().toISOString(),
   };
-}
-
-// ── Local storage helpers ─────────────────────────────────────
-function loadStoresLocal() {
-  const saved = JSON.parse(localStorage.getItem('ac_stores') || '{}');
-  stores = { ...BASE_STORES };
-  Object.keys(saved).forEach(id => { stores[id] = saved[id]; });
-}
-function loadDeliveriesLocal() {
-  deliveries = JSON.parse(localStorage.getItem('ac_deliveries') || '[]');
-}
-function saveDeliveriesLocal() {
-  localStorage.setItem('ac_deliveries', JSON.stringify(deliveries));
 }
 
 // ── Utilities ─────────────────────────────────────────────────
@@ -234,31 +218,30 @@ function storeNeedsAttention(storeId) {
   return false;
 }
 
-// Save a store record locally and best-effort push it to the Sheet so
-// the stock change survives a refresh. ASSUMES sheetAddStore upserts
-// by storeId — if your backend only inserts new rows, this won't
-// stick past the next Sheet pull (localStorage will still be correct
-// on this device though).
+// Save a store record to Supabase (upserts by storeId) — this is now
+// the ONLY place a stock change is persisted. Blocks until confirmed
+// so the caller knows the write actually landed.
 async function persistStoreOverride(id, storeRec) {
-  const saved = JSON.parse(localStorage.getItem('ac_stores')||'{}');
-  saved[id] = storeRec;
-  localStorage.setItem('ac_stores', JSON.stringify(saved));
   if (typeof sheetAddStore === 'function') {
-    try { await sheetAddStore({ storeId:id, ...storeRec }); } catch(e) { /* best effort */ }
+    await sheetAddStore({ storeId: id, ...storeRec });
   }
 }
 
 // Apply (or reverse) a delivery's effect on its store's live stock.
 // isNowDelivered=true moves the store's stock toward "already has
-// d.spicy/d.mild extra on the shelf"; false moves it back toward zero
-// extra. Diffs against what was previously applied, so calling this
-// again after an edit only adds/removes the difference.
+// this delivery's units on the shelf"; false moves it back toward
+// zero extra. Delivery quantities (d.spicy/d.mild) are in CASES, but
+// store stock (S_jun/M_jun) is tracked in UNITS — so every case
+// delivered adds PRICING.unitsPerCase (12) units on top of whatever
+// was already on the shelf. Diffs against what was previously
+// applied, so calling this again after an edit only adds/removes the
+// difference.
 async function reconcileDeliveryStock(d, isNowDelivered) {
   const store = stores[d.storeId];
   if (!store) return;
 
-  const targetSpicy = isNowDelivered ? clamp(d.spicy) : 0;
-  const targetMild  = isNowDelivered ? clamp(d.mild)  : 0;
+  const targetSpicy = isNowDelivered ? clamp(d.spicy) * PRICING.unitsPerCase : 0;
+  const targetMild  = isNowDelivered ? clamp(d.mild)  * PRICING.unitsPerCase : 0;
   const deltaSpicy  = targetSpicy - (d.appliedSpicy || 0);
   const deltaMild   = targetMild  - (d.appliedMild  || 0);
 
@@ -480,7 +463,7 @@ function handlePasteSubmit() {
 }
 
 // Actually merge the staged report into `stores`, same pattern as a
-// Sheet refresh: overwrite S_jun/M_jun, preserve lastRestockedAt/note.
+// DB refresh: overwrite S_jun/M_jun, preserve lastRestockedAt/note.
 async function applyPastedReport() {
   if (!pendingReportUpdates) return;
   const btn = document.getElementById('pr-apply-btn');
@@ -513,15 +496,8 @@ async function applyPastedReport() {
       };
     }
 
-    // Persist locally FIRST — instant, always succeeds, and is what
-    // actually drives the Inventory tab. The Sheet sync below is
-    // best-effort and must not block this.
-    const saved = JSON.parse(localStorage.getItem('ac_stores')||'{}');
-    for (const [storeNum] of entries) {
-      saved[storeNum] = stores[storeNum];
-    }
-    localStorage.setItem('ac_stores', JSON.stringify(saved));
-
+    // Update on-screen state immediately; the loop below is what
+    // actually persists it to Supabase.
     const count = entries.length;
     pendingReportUpdates = null;
     renderInventory();
@@ -532,9 +508,9 @@ async function applyPastedReport() {
     if (summaryEl) summaryEl.style.display = 'none';
     if (btn) { btn.textContent = 'Applied'; }
 
-    // Push to the Sheet in the background, in parallel, with a timeout
+    // Push to Supabase in the background, in parallel, with a timeout
     // per request — a slow or hung call here can no longer freeze the
-    // UI or block the other 68 stores from applying.
+    // UI or block the other stores from applying.
     if (typeof sheetAddStore === 'function') {
       const withTimeout = (p, ms) => Promise.race([
         p,
@@ -621,18 +597,21 @@ function cancelSkuPicker(delivId) {
 }
 
 // Snapshot enough state to fully undo one quick action: the delivery's
-// own fields, plus the whole sales array (since "Delivered" can create
-// or overwrite a sale record).
+// own fields, plus whether a sale record existed for it (and its
+// exact prior contents, if so) — since "Delivered" can create or
+// overwrite a sale record.
 function captureDeliverySnapshot(delivId) {
   const d = deliveries.find(x => String(x.id) === String(delivId));
   if (!d) return null;
+  const existingSale = sales.find(s => String(s.deliveryId) === String(delivId));
   return {
     delivId,
     prevStatus: d.status,
     prevSpicy: d.spicy,
     prevMild: d.mild,
     prevNote: d.lastDeliverNote,
-    prevSalesJson: localStorage.getItem('ac_sales') || '[]',
+    hadSale: !!existingSale,
+    prevSale: existingSale ? { ...existingSale } : null,
   };
 }
 
@@ -692,7 +671,8 @@ function showDeliveryToast(message) {
 
 async function undoLastDeliveryAction() {
   if (!lastDeliveryAction) return;
-  const { delivId, prevStatus, prevSpicy, prevMild, prevNote, prevSalesJson } = lastDeliveryAction;
+  const { delivId, prevStatus, prevSpicy, prevMild, prevNote, hadSale, prevSale } = lastDeliveryAction;
+
   const d = deliveries.find(x => String(x.id) === String(delivId));
   if (d) {
     d.status = prevStatus;
@@ -701,10 +681,19 @@ async function undoLastDeliveryAction() {
     d.lastDeliverNote = prevNote;
     d.updatedAt = new Date().toISOString();
     await reconcileDeliveryStock(d, prevStatus === 'delivered');
-    saveDeliveriesLocal();
     await sheetUpdateDelivery(d);
   }
-  localStorage.setItem('ac_sales', prevSalesJson);
+
+  const idx = sales.findIndex(s => String(s.deliveryId) === String(delivId));
+  if (hadSale) {
+    // A sale already existed before this action — restore its exact prior values.
+    if (idx >= 0) sales[idx] = prevSale; else sales.unshift(prevSale);
+    await sheetAddSale(prevSale);
+  } else if (idx >= 0) {
+    // This action created a sale that didn't exist before — remove it.
+    const [removed] = sales.splice(idx, 1);
+    await sheetDeleteSale(removed);
+  }
 
   const toast = document.getElementById('delivery-toast');
   if (toast) toast.style.display = 'none';
@@ -1021,7 +1010,6 @@ async function queueDelivery(storeId) {
     createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(),
   };
   deliveries.unshift(rec);
-  saveDeliveriesLocal();
   await sheetAddDelivery(rec);
   renderInventory();
   renderDeliveries();
@@ -1150,15 +1138,12 @@ async function quickUpdateStatus(delivId, status, delivered = null) {
 
   await reconcileDeliveryStock(d, status === 'delivered');
 
-  saveDeliveriesLocal();
   await sheetUpdateDelivery(d);
 
   if (status === 'delivered') {
     const sale = buildSaleRecord(d);
-    const sales = JSON.parse(localStorage.getItem('ac_sales')||'[]');
-    const idx   = sales.findIndex(s=>String(s.deliveryId)===String(d.id));
+    const idx  = sales.findIndex(s=>String(s.deliveryId)===String(d.id));
     if (idx>=0) sales[idx]=sale; else sales.unshift(sale);
-    localStorage.setItem('ac_sales', JSON.stringify(sales));
     await sheetAddSale(sale);
   }
 
@@ -1180,18 +1165,15 @@ async function bulkUpdateFiltered(status) {
     d.updatedAt = new Date().toISOString();
     await reconcileDeliveryStock(d, status === 'delivered');
   }
-  saveDeliveriesLocal();
   await Promise.all(list.map(d=>sheetUpdateDelivery(d)));
 
   if (status === 'delivered') {
-    const sales = JSON.parse(localStorage.getItem('ac_sales')||'[]');
     for (const d of list) {
       const sale = buildSaleRecord(d);
       const idx  = sales.findIndex(s=>String(s.deliveryId)===String(d.id));
       if (idx>=0) sales[idx]=sale; else sales.unshift(sale);
       await sheetAddSale(sale);
     }
-    localStorage.setItem('ac_sales', JSON.stringify(sales));
   }
 
   renderInventory();
@@ -1243,15 +1225,12 @@ async function saveStatus() {
 
   await reconcileDeliveryStock(d, newStatus === 'delivered');
 
-  saveDeliveriesLocal();
   await sheetUpdateDelivery(d);
 
   if (newStatus==='delivered') {
     const sale = buildSaleRecord(d);
-    const sales = JSON.parse(localStorage.getItem('ac_sales')||'[]');
-    const idx   = sales.findIndex(s=>String(s.deliveryId)===String(d.id));
+    const idx  = sales.findIndex(s=>String(s.deliveryId)===String(d.id));
     if (idx>=0) sales[idx]=sale; else sales.unshift(sale);
-    localStorage.setItem('ac_sales', JSON.stringify(sales));
     await sheetAddSale(sale);
   }
 
@@ -1266,7 +1245,6 @@ async function deleteDelivery(delivId) {
   const d = deliveries.find(x => String(x.id)===String(delivId));
   if (d) await reconcileDeliveryStock(d, false); // undo any stock it had already applied
   deliveries = deliveries.filter(x => String(x.id)!==String(delivId));
-  saveDeliveriesLocal();
   await sheetDeleteDelivery(delivId);
   renderInventory();
   renderDeliveries();
@@ -1327,7 +1305,6 @@ async function saveRun() {
   });
 
   deliveries.unshift(...newRecs);
-  saveDeliveriesLocal();
   await Promise.all(newRecs.map(r=>sheetAddDelivery(r)));
   renderInventory();
   renderDeliveries();
@@ -1375,7 +1352,7 @@ function ensureSalesGroupDetailOption() {
 function renderSales() {
   ensureSalesGroupDetailOption();
 
-  const all   = JSON.parse(localStorage.getItem('ac_sales')||'[]');
+  const all   = sales;
   const groupBy = document.getElementById('sales-group')?.value || 'store';
 
   const filtered = all.filter(s=>{
@@ -1523,8 +1500,7 @@ function ensureSalesEditModal() {
 
 function openSaleEditModal(deliveryId) {
   ensureSalesEditModal();
-  const all = JSON.parse(localStorage.getItem('ac_sales')||'[]');
-  const sale = all.find(s=>String(s.deliveryId)===String(deliveryId));
+  const sale = sales.find(s=>String(s.deliveryId)===String(deliveryId));
   if (!sale) return;
   currentEditSaleId = deliveryId;
   document.getElementById('se-date').value   = sale.date || today();
@@ -1542,17 +1518,16 @@ function closeSaleEditModal() {
 
 async function saveSaleEdit() {
   if (!currentEditSaleId) return;
-  const all = JSON.parse(localStorage.getItem('ac_sales')||'[]');
-  const idx = all.findIndex(s=>String(s.deliveryId)===String(currentEditSaleId));
+  const idx = sales.findIndex(s=>String(s.deliveryId)===String(currentEditSaleId));
   if (idx < 0) return;
 
   const spicy = parseInt(document.getElementById('se-spicy').value) || 0;
   const mild  = parseInt(document.getElementById('se-mild').value)  || 0;
   const cases = spicy + mild;
 
-  all[idx] = {
-    ...all[idx],
-    date:   document.getElementById('se-date').value || all[idx].date,
+  sales[idx] = {
+    ...sales[idx],
+    date:   document.getElementById('se-date').value || sales[idx].date,
     driver: document.getElementById('se-driver').value.trim(),
     spicyCases: spicy,
     mildCases:  mild,
@@ -1563,11 +1538,8 @@ async function saveSaleEdit() {
     cogs:        cases*PRICING.unitsPerCase*PRICING.unitCost,
     grossProfit: (cases*PRICING.casePrice)-(cases*PRICING.unitsPerCase*PRICING.unitCost)-PRICING.deliveryFeePerVisit,
   };
-  localStorage.setItem('ac_sales', JSON.stringify(all));
 
-  if (typeof sheetUpdateSale === 'function') {
-    try { await sheetUpdateSale(all[idx]); } catch(e) { /* best effort — no backend hook yet */ }
-  }
+  await sheetAddSale(sales[idx]); // upsert by delivery_id — overwrites the existing row
 
   closeSaleEditModal();
   renderSales();
@@ -1575,15 +1547,10 @@ async function saveSaleEdit() {
 
 async function deleteSaleRecord(deliveryId) {
   if (!confirm('Delete this sale record? This only removes it from Sales History — it will not change the original delivery.')) return;
-  let all = JSON.parse(localStorage.getItem('ac_sales')||'[]');
-  const rec = all.find(s=>String(s.deliveryId)===String(deliveryId));
-  all = all.filter(s=>String(s.deliveryId)!==String(deliveryId));
-  localStorage.setItem('ac_sales', JSON.stringify(all));
-
-  if (typeof sheetDeleteSale === 'function' && rec) {
-    try { await sheetDeleteSale(rec); } catch(e) { /* best effort — no backend hook yet */ }
-  }
-
+  const idx = sales.findIndex(s=>String(s.deliveryId)===String(deliveryId));
+  if (idx < 0) return;
+  const [removed] = sales.splice(idx, 1);
+  await sheetDeleteSale(removed);
   renderSales();
 }
 
@@ -1604,10 +1571,6 @@ async function saveNewStore() {
 
   const rec = { addr, city, zip, S_may:0, M_may:0, S_jun:spc, M_jun:mld };
   stores[num] = rec;
-
-  const saved = JSON.parse(localStorage.getItem('ac_stores')||'{}');
-  saved[num] = rec;
-  localStorage.setItem('ac_stores', JSON.stringify(saved));
 
   await sheetAddStore({ storeId:num, ...rec, addedAt:new Date().toISOString() });
   renderInventory();
