@@ -1,18 +1,14 @@
 // ============================================================
-// AUNT CAROL'S SAUCE — SUPABASE DATA LAYER  v2
-// Replaces the Google Sheets Apps Script backend as the app's live,
-// real-time data source. Still writes to the old Sheet too (best
-// effort, one-way, non-blocking) so it keeps working as a human-
-// readable backup/export — but the app never READS from Sheets again,
-// which is what avoids the sync-conflict/stale-overwrite bugs from
-// earlier in this build.
+// AUNT CAROL'S SAUCE — SUPABASE DATA LAYER  v3
+// The app's ONLY live data source — stores/deliveries/sales are read
+// from and written to Supabase exclusively. Still mirrors writes to
+// the old Google Sheet too (best effort, one-way, non-blocking) so it
+// keeps working as a human-readable backup/export — but the app never
+// reads from Sheets, which is what avoids per-device sync conflicts.
 //
-// v2 fix: the client instance is now named `sb`, not `supabase` — the
-// CDN library itself declares a global `var supabase`, and you can't
-// also declare `const supabase` in the same scope (that's the
-// "Identifier 'supabase' has already been declared" SyntaxError).
-// v2 fix: setSyncStatus() now targets the real element id `sync-lbl`
-// (was incorrectly `sync-label`, which silently did nothing).
+// v3 change: added sheetDeleteSale (Supabase-backed) — previously the
+// app only guarded a call to this function with typeof, so deletes on
+// the Sales tab were never actually persisted anywhere.
 // ============================================================
 
 const SUPABASE_URL = 'https://fsyypypudlaaretqkzwj.supabase.co';
@@ -197,6 +193,16 @@ async function sheetAddSale(sale) {
   mirrorToSheet('addSale', sale);
 }
 
+async function sheetDeleteSale(sale) {
+  try {
+    const { error } = await sb.from('sales').delete().eq('delivery_id', sale.deliveryId);
+    if (error) throw error;
+  } catch (e) {
+    console.error('sheetDeleteSale (Supabase) failed:', e);
+  }
+  mirrorToSheet('deleteSale', sale);
+}
+
 // ── Realtime: push updates to every open browser ────────────
 function initSupabaseRealtime() {
   sb
@@ -206,13 +212,3 @@ function initSupabaseRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'sales' },      () => refreshFromSheet())
     .subscribe();
 }
-
-// ============================================================
-// TWO SMALL CHANGES STILL NEEDED IN app.js (if not already done):
-//
-// 1. Inside refreshFromSheet(), replace the raw fetch for stores with:
-//      supabaseGetStores()
-//
-// 2. Inside boot(), right after startAutoSync(), add:
-//      initSupabaseRealtime();
-// ============================================================
