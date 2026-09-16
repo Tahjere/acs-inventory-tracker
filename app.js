@@ -1637,13 +1637,11 @@ function switchImportTab(name, el) {
   document.getElementById('import-tab-' + name).classList.add('active');
 }
 
-function clearParseState() {
+function clearParseStatusOnly() {
   const status  = document.getElementById('parse-status');
   const summary = document.getElementById('parse-summary');
-  const pasteInput = document.getElementById('paste-input');
   if (status)  status.textContent = '';
   if (summary) { summary.style.display = 'none'; summary.innerHTML = ''; }
-  if (pasteInput) pasteInput.value = '';
   pendingReportUpdates = null;
 }
 
