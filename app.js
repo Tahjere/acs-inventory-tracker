@@ -1,7 +1,14 @@
 // ============================================================
-// AUNT CAROL'S SAUCE — APP LOGIC  v10  (this file is your app.js)
+// AUNT CAROL'S SAUCE — APP LOGIC  v10.1  (this file is your app.js)
 // Storage: Supabase ONLY (primary + realtime), mirrored write-only
 // to Google Sheets as a human-readable backup export.
+//
+// v10.1 change: fixed the paste-report textarea being unusable —
+// its oninput was wired to clearParseState(), which wipes the
+// textarea's own value, so every keystroke/paste was immediately
+// erased. Split into clearParseState() (full reset, used when the
+// modal opens) and clearParseStatusOnly() (used by the textarea's
+// own oninput, never touches its value).
 //
 // v10 change: localStorage removed completely as a data store
 // (ac_stores / ac_deliveries / ac_sales are gone). With multiple
@@ -243,7 +250,7 @@ async function reconcileDeliveryStock(d, isNowDelivered) {
   const targetSpicy = isNowDelivered ? clamp(d.spicy) * PRICING.unitsPerCase : 0;
   const targetMild  = isNowDelivered ? clamp(d.mild)  * PRICING.unitsPerCase : 0;
   const deltaSpicy  = targetSpicy - (d.appliedSpicy || 0);
-  const deltaMild   = targetMild  - (d.appliedMild  || 0);
+  const deltaMild   = targetMild - (d.appliedMild  || 0);
 
   if (deltaSpicy !== 0 || deltaMild !== 0) {
     // "Versus/last" only moves for a SKU that actually changed —
@@ -1637,6 +1644,23 @@ function switchImportTab(name, el) {
   document.getElementById('import-tab-' + name).classList.add('active');
 }
 
+// Full reset — used when the upload modal is freshly opened. Clears
+// the textarea itself along with the status/summary. Do NOT wire
+// this to the textarea's own oninput (see clearParseStatusOnly below)
+// or every keystroke/paste immediately erases what was just typed in.
+function clearParseState() {
+  const status  = document.getElementById('parse-status');
+  const summary = document.getElementById('parse-summary');
+  const pasteInput = document.getElementById('paste-input');
+  if (status)  status.textContent = '';
+  if (summary) { summary.style.display = 'none'; summary.innerHTML = ''; }
+  if (pasteInput) pasteInput.value = '';
+  pendingReportUpdates = null;
+}
+
+// Same cleanup as clearParseState(), minus touching the textarea's
+// own value. This is what the paste-input's oninput should call, so
+// that typing/pasting into the box doesn't get wiped out immediately.
 function clearParseStatusOnly() {
   const status  = document.getElementById('parse-status');
   const summary = document.getElementById('parse-summary');
